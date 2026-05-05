@@ -35,7 +35,7 @@ jobs:
           echo "Prompting Gemini in headless mode..."
           
           # Use the -p flag as required by the CLI
-          gemini -p "$RULES 
+          gemini --skip-trust -p "$RULES 
           Repository Structure: $TREE 
           User Prompt: '$USER_PROMPT'" > execute_changes.sh
           
