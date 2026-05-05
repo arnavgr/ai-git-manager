@@ -1,0 +1,60 @@
+name: Gemini Coding Agent
+on:
+  repository_dispatch:
+    types: [ai_cmd]
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Manager (For Rules)
+        uses: actions/checkout@v4
+        
+      - name: Checkout Target Repo
+        run: |
+          git clone https://x-access-token:${{ secrets.GH_PAT }}@[github.com/$](https://github.com/$){{ github.event.client_payload.repo }} target
+          
+      - name: Setup Node & Install Gemini CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @google/gemini-cli
+
+      - name: Execute Agentic Changes
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Read the system rules to save tokens
+          RULES=$(cat gemini.md)
+          
+          cd target
+          # Map the target repo structure (ignoring git/node_modules)
+          TREE=$(find . -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
+          
+          echo "Prompting Gemini..."
+          # Pass rules, file structure, and user prompt to Gemini
+          gemini "$RULES 
+          Repository Structure: $TREE 
+          User Prompt: '${{ github.event.client_payload.prompt }}'" --non-interactive > execute_changes.sh
+          
+          # Failsafe: Strip accidental markdown fences
+          sed -i '/^```/d' execute_changes.sh
+          
+          # Execute the AI-generated file modifications
+          bash execute_changes.sh
+          rm execute_changes.sh
+
+      - name: Commit and Push
+        working-directory: ./target
+        run: |
+          git config user.name "Gemini Agent"
+          git config user.email "agent@arnavgr.com"
+          git add .
+          
+          # Push only if files were modified
+          if git diff-index --quiet HEAD; then
+            echo "No changes made."
+          else
+            git commit -m "AI Update: ${{ github.event.client_payload.prompt }}"
+            git push origin HEAD
+          fi
