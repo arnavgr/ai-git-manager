@@ -23,22 +23,28 @@ jobs:
       - name: Execute Agentic Changes
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          USER_PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
-          # Read the system rules to save tokens
+          # Read the system rules (Before changing directories)
           RULES=$(cat gemini.md)
           
           cd target
           # Map the target repo structure (ignoring git/node_modules)
           TREE=$(find . -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
           
-          echo "Prompting Gemini..."
-          # Pass rules, file structure, and user prompt to Gemini
-          gemini "$RULES 
+          echo "Prompting Gemini in headless mode..."
+          
+          # Use the -p flag as required by the CLI
+          gemini -p "$RULES 
           Repository Structure: $TREE 
-          User Prompt: '${{ github.event.client_payload.prompt }}'" --non-interactive > execute_changes.sh
+          User Prompt: '$USER_PROMPT'" > execute_changes.sh
           
           # Failsafe: Strip accidental markdown fences
           sed -i '/^```/d' execute_changes.sh
+          
+          echo "--- Generated Execution Script ---"
+          cat execute_changes.sh
+          echo "----------------------------------"
           
           # Execute the AI-generated file modifications
           bash execute_changes.sh
