@@ -29,6 +29,16 @@ jobs:
           EXTRA_FLAGS=""
           [ "${{ github.event.client_payload.dryrun }}" = "1" ] && EXTRA_FLAGS="--dry-run"
 
+          echo "PROMPT: ${{ github.event.client_payload.prompt }}"
+          echo "KEY set: ${{ secrets.GEMINI_API_KEY != '' }}"
+  
+          # Also test the API directly with a hardcoded tiny payload:
+          curl -s -X POST \
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=$GEMINI_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"contents":[{"parts":[{"text":"say hi"}]}]}' \
+          -m 30
+  
           bash coder.sh \
             --repo-path ./target \
             --prompt "${{ github.event.client_payload.prompt }}" \
