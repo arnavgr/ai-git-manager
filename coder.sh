@@ -18,32 +18,32 @@ VERSION="0.1.0"
 
 # --- Config ------------------------------------------------------------------
 MODEL="gemini-3.1-flash-lite-preview"
-MAX_FILE_SIZE_KB=100   # skip individual files larger than this
-MAX_TOTAL_KB=400       # stop slurping once codebase exceeds this
+MAX_FILE_SIZE_KB=100
+MAX_TOTAL_KB=400
 
-# Extensions to include when reading the target repo
 INCLUDE_EXTS="js|ts|jsx|tsx|py|sh|bash|rb|go|rs|c|cpp|h|java|php|css|html|json|yaml|yml|toml|md|txt|env\.example"
-
-# Paths to always skip
 SKIP_PATTERNS="node_modules|\.git|\.next|dist|build|__pycache__|\.pyc|package-lock\.json|yarn\.lock|pnpm-lock"
 
 # --- Runtime state -----------------------------------------------------------
 REPO_PATH="."
 PROMPT=""
 DRY_RUN=false
-OUTPUT_MODE="bash"   # bash | patch
+OUTPUT_MODE="bash"
 RULES_FILE=""
 
 # =============================================================================
 #  HELPERS
 # =============================================================================
 log() { echo "[coder] $*" >&2; }
-die() { echo "[coder] FATAL: $*" >&2; exit 1; }
+die() {
+    local msg="$1"
+    log "FATAL: $msg"
+    log_status "❌ FAILED: $msg"
+    exit 1
+}
 
 # =============================================================================
 #  KV STATUS LOGGING
-#  Posts progress to Cloudflare KV so you can poll it from your CloudPhone.
-#  Silently skips if CF secrets are not set — agent still works without KV.
 # =============================================================================
 log_status() {
     local msg="$1"
@@ -72,7 +72,7 @@ check_deps() {
 }
 
 # =============================================================================
-#  API KEY — GH Actions secret only, no file fallback
+#  API KEY
 # =============================================================================
 load_api_key() {
     [ -z "$GEMINI_API_KEY" ] && die "GEMINI_API_KEY secret is not set in this repo's settings"
@@ -81,8 +81,6 @@ load_api_key() {
 
 # =============================================================================
 #  CODEBASE SLURP
-#  Reads actual file contents into a single string for the prompt.
-#  README is always included first so Gemini has project context.
 # =============================================================================
 slurp_codebase() {
     log "Scanning $REPO_PATH ..."
@@ -91,7 +89,6 @@ slurp_codebase() {
     local file_count=0
     local output=""
 
-    # README first — gives Gemini project context before any code
     for readme in README.md readme.md README.txt; do
         local rpath="$REPO_PATH/$readme"
         if [ -f "$rpath" ]; then
@@ -105,13 +102,9 @@ slurp_codebase() {
     while IFS= read -r filepath; do
         local relpath="${filepath#$REPO_PATH/}"
 
-        # Skip unwanted paths
         echo "$relpath" | grep -qE "($SKIP_PATTERNS)" && continue
-
-        # Skip non-matching extensions
         echo "$filepath" | grep -qE "\.($INCLUDE_EXTS)$" || continue
 
-        # Skip files that are too large
         local size_kb
         size_kb=$(du -k "$filepath" 2>/dev/null | cut -f1)
         if [ "${size_kb:-0}" -gt "$MAX_FILE_SIZE_KB" ]; then
@@ -138,8 +131,6 @@ slurp_codebase() {
 
 # =============================================================================
 #  PROMPT BUILDER
-#  Uses gemini.md as rules when --rules is passed (agent.yml always passes it).
-#  Falls back to inline defaults if the file is somehow missing.
 # =============================================================================
 build_prompt() {
     local codebase="$1"
@@ -174,10 +165,12 @@ RULES:
 }
 
 # =============================================================================
-#  GEMINI API CALL  (non-streaming — simpler and reliable for CI)
+#  GEMINI API CALL
+#  Writes response to a temp file to avoid subshell exit swallowing die()
 # =============================================================================
 call_gemini() {
     local prompt="$1"
+    local out_file="$2"   # caller passes a temp file path to write result into
 
     local payload
     payload=$(jq -n --arg p "$prompt" \
@@ -195,7 +188,6 @@ call_gemini() {
     local api_err
     api_err=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
     if [ -n "$api_err" ]; then
-        log_status "❌ FAILED: Gemini API error — $api_err"
         die "Gemini API error: $api_err"
     fi
 
@@ -204,11 +196,11 @@ call_gemini() {
 
     if [ -z "$text" ]; then
         log "Raw API response: $response"
-        log_status "❌ FAILED: Empty response from Gemini"
-        die "Empty response from Gemini"
+        die "Empty response from Gemini — check model name: $MODEL"
     fi
 
-    printf '%s' "$text"
+    # Write to file instead of stdout so we stay in the parent shell
+    printf '%s' "$text" > "$out_file"
 }
 
 # =============================================================================
@@ -217,11 +209,9 @@ call_gemini() {
 apply_bash() {
     local script="$1"
 
-    # Strip any accidental markdown fences
     script=$(printf '%s' "$script" | sed '/^```/d')
 
     if echo "$script" | grep -q "^exit 1$"; then
-        log_status "❌ FAILED: Gemini flagged task as impossible"
         die "Gemini flagged the task as impossible"
     fi
 
@@ -240,10 +230,7 @@ apply_bash() {
     local exit_code=$?
     rm -f /tmp/coder_execute.sh
 
-    if [ $exit_code -ne 0 ]; then
-        log_status "❌ FAILED: Generated script exited with code $exit_code"
-        die "Script exited with code $exit_code"
-    fi
+    [ $exit_code -ne 0 ] && die "Generated script exited with code $exit_code"
 }
 
 apply_patch() {
@@ -252,14 +239,12 @@ apply_patch() {
     patch_content=$(printf '%s' "$patch_content" | sed '/^```/d')
 
     if echo "$patch_content" | grep -q "^IMPOSSIBLE$"; then
-        log_status "❌ FAILED: Gemini flagged task as impossible"
         die "Gemini flagged the task as impossible"
     fi
 
     if ! echo "$patch_content" | grep -q "^---"; then
         log "Gemini output was not a valid patch:"
         printf '%s\n' "$patch_content" >&2
-        log_status "❌ FAILED: Gemini did not return a valid patch"
         die "Invalid patch output — try --mode bash or rephrase the task"
     fi
 
@@ -276,10 +261,7 @@ apply_patch() {
     printf '%s' "$patch_content" | patch -p1
     local exit_code=$?
 
-    if [ $exit_code -ne 0 ]; then
-        log_status "❌ FAILED: patch command failed with code $exit_code"
-        die "patch failed with exit code $exit_code"
-    fi
+    [ $exit_code -ne 0 ] && die "patch command failed with exit code $exit_code"
 }
 
 # =============================================================================
@@ -341,7 +323,12 @@ CODEBASE=$(slurp_codebase)
 
 log_status "🧠 THINKING: Gemini (${MODEL}) is working..."
 FULL_PROMPT=$(build_prompt "$CODEBASE")
-RESULT=$(call_gemini "$FULL_PROMPT")
+
+# Use a temp file so call_gemini's die() exits the parent shell, not a subshell
+RESULT_FILE=$(mktemp)
+call_gemini "$FULL_PROMPT" "$RESULT_FILE"
+RESULT=$(cat "$RESULT_FILE")
+rm -f "$RESULT_FILE"
 
 log_status "🛠️ EXECUTING: Applying ${OUTPUT_MODE} changes..."
 if [ "$OUTPUT_MODE" = "patch" ]; then
