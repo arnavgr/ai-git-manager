@@ -17,7 +17,7 @@
 VERSION="0.1.0"
 
 # --- Config ------------------------------------------------------------------
-MODEL="gemini-3.1-flash-lite-preview"
+MODEL="gemini-2.5-flash-lite"
 MAX_FILE_SIZE_KB=100
 MAX_TOTAL_KB=400
 
