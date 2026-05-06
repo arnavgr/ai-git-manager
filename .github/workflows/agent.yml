@@ -7,48 +7,34 @@ jobs:
   execute:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Manager (For Rules)
+      - name: Checkout Manager Repo
         uses: actions/checkout@v4
-        
+        # This checks out the private manager repo — agent.yml, gemini.md,
+        # and coder.sh are all now available on the runner at ./
+
       - name: Checkout Target Repo
         run: |
           git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }} target
-          
-      - name: Setup Node & Install Gemini CLI
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm install -g @google/gemini-cli
 
-      - name: Execute Agentic Changes
+      - name: Run Coder Agent
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          USER_PROMPT: ${{ github.event.client_payload.prompt }}
+          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
+          CF_ACCOUNT_ID:   ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN:    ${{ secrets.CF_API_TOKEN }}
+          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
         run: |
-          # Read the system rules (Before changing directories)
-          RULES=$(cat gemini.md)
-          
-          cd target
-          # Map the target repo structure (ignoring git/node_modules)
-          TREE=$(find . -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
-          
-          echo "Prompting Gemini in headless mode..."
-          
-          # Use the -p flag as required by the CLI
-          gemini --skip-trust -m gemini-3.1-flash-lite -p "$RULES 
-          Repository Structure: $TREE 
-          User Prompt: '$USER_PROMPT'" > execute_changes.sh
-          
-          # Failsafe: Strip accidental markdown fences
-          sed -i '/^```/d' execute_changes.sh
-          
-          echo "--- Generated Execution Script ---"
-          cat execute_changes.sh
-          echo "----------------------------------"
-          
-          # Execute the AI-generated file modifications
-          bash execute_changes.sh
-          rm execute_changes.sh
+          MODE="${{ github.event.client_payload.mode }}"
+          MODE="${MODE:-bash}"
+
+          EXTRA_FLAGS=""
+          [ "${{ github.event.client_payload.dryrun }}" = "1" ] && EXTRA_FLAGS="--dry-run"
+
+          bash coder.sh \
+            --repo-path ./target \
+            --prompt "${{ github.event.client_payload.prompt }}" \
+            --mode "$MODE" \
+            --rules gemini.md \
+            $EXTRA_FLAGS
 
       - name: Commit and Push
         working-directory: ./target
@@ -56,11 +42,12 @@ jobs:
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
           git add .
-          
-          # Push only if files were modified
+
           if git diff-index --quiet HEAD; then
-            echo "No changes made."
+            echo "No changes to commit."
           else
+            BRANCH="${{ github.event.client_payload.branch }}"
+            BRANCH="${BRANCH:-main}"
             git commit -m "AI Update: ${{ github.event.client_payload.prompt }}"
-            git push origin HEAD
+            git push origin HEAD:refs/heads/$BRANCH
           fi
