@@ -82,33 +82,39 @@ jobs:
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
           
-          # 1. Clean up the backup files patch creates
+          # Clean up the backup files patch creates
           rm -f *.orig *.rej
           
           git add .
           
           if git diff-index --quiet HEAD; then
             echo "No changes made."
-            # Store the outcome to pass to the final step
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
-            git commit -m "AI Update: ${{ github.event.client_payload.prompt }}"
-            git push origin HEAD
-            # Store the outcome to pass to the final step
-            echo "FINAL_MSG=✅ Done: Changes pushed to main." >> $GITHUB_ENV
+            # Extract the AI-generated commit message
+            if [ -f commit_msg.txt ]; then
+              COMMIT_MSG=$(cat commit_msg.txt)
+              rm commit_msg.txt
+            else
+              COMMIT_MSG="AI Update: Codebase modified."
+            fi
+            
+            git commit -m "$COMMIT_MSG"
+            git push origin ${{ github.event.client_payload.branch }}
+            
+            echo "FINAL_MSG=✅ Done: Changes pushed to ${{ github.event.client_payload.branch }}." >> $GITHUB_ENV
           fi 
 
       - name: Final KV Status Update
-        if: always() # This forces the step to run even if the bash script crashes
+        if: always()
         run: |
-          # Determine the appropriate message based on the job status
           if [ "${{ job.status }}" == "success" ]; then
              STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
-             STATUS_MSG="❌ Failed: The patch or bash execution crashed. Check GitHub Actions logs."
+             STATUS_MSG="❌ Failed: The patch or bash execution crashed. Check logs."
           fi
           
-          # Use -g to disable globbing, ensuring URLs with brackets don't break curl
-          curl -g -X PUT "[https://api.cloudflare.com/client/v4/accounts/$](https://api.cloudflare.com/client/v4/accounts/$){{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status" \
-          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+          # Using environment variables directly to prevent malformed URL interpolation
+          curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "$STATUS_MSG"

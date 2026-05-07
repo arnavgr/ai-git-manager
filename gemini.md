@@ -27,4 +27,6 @@ GOAL: Fulfill the user prompt by checking current web docs for accuracy, then pa
 
 If the repo has a README.md read it properly to get the entire context of what is being worked on, sometimes you wont have the entire context given in the prompt and you would have to find the context on your own by reading the README.md
 
-make the commit messages as professional as possible and not just throw my prompt as a commit message
+COMMIT MESSAGE:
+You must also generate a short, professional git commit message summarizing your changes. Output it to a file named `commit_msg.txt`.
+Example: `echo "Update: Add testing retro emulator link" > commit_msg.txt`
