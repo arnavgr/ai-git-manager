@@ -45,9 +45,10 @@ jobs:
           # We just give it the tree, no file contents
           TREE=$(find . -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
           
-          curl -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
+         # 2. Update Status to 3/4 (Surgical & Clean URL)
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: AI Investigating and Patching..."
+          -d "⏳ 3/4: Generating and applying patches..."
 
           # Run Gemini WITH the run_shell_command tool enabled
           gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
