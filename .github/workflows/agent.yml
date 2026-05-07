@@ -42,39 +42,34 @@ jobs:
           
           cd target
           
-          # Bundle the entire codebase into one text block for context
-          echo "Building codebase context..."
-          touch codebase_context.txt
-          for f in $(find . -type f -not -path "*/\.git/*" -not -path "*/node_modules/*" -not -name "codebase_context.txt"); do
-            echo "==== FILE: $f ====" >> codebase_context.txt
-            cat "$f" >> codebase_context.txt
-            echo "" >> codebase_context.txt
-          done
+          # We just give it the tree, no file contents
+          TREE=$(find . -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
           
-          CODEBASE=$(cat codebase_context.txt)
-          rm codebase_context.txt
-
-          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: Generating and applying patches..."
+          -d "⏳ 3/4: AI Investigating and Patching..."
 
-          # Run Gemini. We pipe the output directly to a shell script.
-          gemini --skip-trust --yolo -m gemini-3.1-flash-lite-preview -p "$RULES 
-          --- CODEBASE --- 
-          $CODEBASE 
+          # Run Gemini WITH the run_shell_command tool enabled
+          gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
+          --tools run_shell_command \
+          -p "$RULES 
+          --- REPO MAP --- 
+          $TREE 
           --- USER PROMPT --- 
           $USER_PROMPT" > ../execute_changes.sh
           
           cd ..
-          # Strip accidental markdown fences just in case the AI hallucinates them
           sed -i '/^```/d' execute_changes.sh
           
           echo "--- Generated Script ---"
           cat execute_changes.sh
           
-          # Apply the changes
           cd target
-          bash ../execute_changes.sh
+          bash ../execute_changes.sh || export PATCH_FAILED=true
+          if [ "$PATCH_FAILED" = "true" ]; then
+            echo "Patch application failed."
+            exit 1
+          fi
 
       - name: Commit and Push
         working-directory: ./target

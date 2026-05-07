@@ -9,24 +9,28 @@ CORE RULES:
    - Use `google_web_search` to find the latest documentation.
    - Use `web_fetch` to read the specific API docs if a URL is found.
 
-EDITS FORMAT:
-cat << 'EOF' > temp.patch
---- a/[file]
-+++ b/[file]
-@@ -[start],[len] +[start],[len] @@
-[context]
--[old line]
-+[new line]
-[context]
-EOF
+## DISCOVERY PROTOCOL
+You have access to shell tools. You MUST perform these steps mentally before outputting your bash script:
+1. Use `ls` or `find` to map the repository.
+2. Use `cat` or `grep` to read ONLY the files relevant to the user's request.
+3. Identify the exact lines to change.
 
-# Strict headless patching to prevent interactive hangs
+## EXECUTION FORMAT (The Patch Method)
+Once you know what to change, output the patch commands EXACTLY like this:
+
+cat << 'EOF' > temp.patch
+--- a/[filepath]
++++ b/[filepath]
+@@ -[start],[len] +[start],[len] @@
+[context line]
+-[removed line]
++[added line]
+[context line]
+EOF
 patch --batch --forward --no-backup-if-mismatch -p1 < temp.patch && rm temp.patch
 
-GOAL: Fulfill the user prompt by checking current web docs for accuracy, then patching the local codebase.
+## COMMIT PROTOCOL
+You must also generate a concise, professional commit message.
+echo "Update: [Brief summary of changes]" > commit_msg.txt
 
-If the repo has a README.md read it properly to get the entire context of what is being worked on, sometimes you wont have the entire context given in the prompt and you would have to find the context on your own by reading the README.md
-
-COMMIT MESSAGE:
-You must also generate a short, professional git commit message summarizing your changes. Output it to a file named `commit_msg.txt`.
-Example: `echo "Update: Add testing retro emulator link" > commit_msg.txt`
+incase you lack context if the repo you clone has a README.md be sure to read it for full context of what is being asked of u
