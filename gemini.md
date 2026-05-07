@@ -19,10 +19,12 @@ cat << 'EOF' > temp.patch
 +[new line]
 [context]
 EOF
-patch -p1 < temp.patch && rm temp.patch
+
+# Strict headless patching to prevent interactive hangs
+patch --batch --forward --no-backup-if-mismatch -p1 < temp.patch && rm temp.patch
 
 GOAL: Fulfill the user prompt by checking current web docs for accuracy, then patching the local codebase.
 
 If the repo has a README.md read it properly to get the entire context of what is being worked on, sometimes you wont have the entire context given in the prompt and you would have to find the context on your own by reading the README.md
 
-
+make the commit messages as professional as possible and not just throw my prompt as a commit message
