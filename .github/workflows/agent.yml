@@ -81,18 +81,20 @@ jobs:
         run: |
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
+          
+          # 1. Clean up the backup files patch creates
+          rm -f *.orig *.rej
+          
           git add .
           
           if git diff-index --quiet HEAD; then
             echo "No changes made."
-            curl -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -d "❌ Finished: No code changes were generated."
           else
             git commit -m "AI Update: ${{ github.event.client_payload.prompt }}"
-            git push origin ${{ github.event.client_payload.branch }}
+            git push origin HEAD
             
-            curl -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -d "✅ Done! Changes pushed to branch: ${{ github.event.client_payload.branch }}"
-          fi
+            # 2. Fix the curl command: Add -g (globoff) and remove outer brackets
+            curl -g -X PUT "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -d "✅ Done: Changes pushed to main"
+          fi 
