@@ -21,7 +21,8 @@ jobs:
       
       - name: Checkout Target Repo
         run: |
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@[github.com/$](https://github.com/$){{ github.event.client_payload.repo }} target
+          # STRIPPED MARKDOWN LINK HERE. WRAPPED IN QUOTES.
+          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }}" target
           cd target
           git checkout ${{ github.event.client_payload.branch }} || git checkout -b ${{ github.event.client_payload.branch }}
 
@@ -38,7 +39,8 @@ jobs:
           cd target
           RULES=$(cat gemini.md)
           
-          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
+          # STRIPPED MARKDOWN LINK HERE.
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 3/4: Generating and applying patches..."
 
@@ -109,7 +111,7 @@ jobs:
           fi
           
           # Use GitHub secrets directly to prevent environment variables from dropping
-          TARGET_URL="https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status"
+          TARGET_URL="[https://api.cloudflare.com/client/v4/accounts/$](https://api.cloudflare.com/client/v4/accounts/$){{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status"
           
           curl -g -s -X PUT "$TARGET_URL" \
           -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
