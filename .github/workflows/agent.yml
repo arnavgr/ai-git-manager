@@ -63,7 +63,7 @@ jobs:
           rm codebase_context.txt
 
           # Run Gemini
-          gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
+          gemini --skip-trust --yolo -m gemini-3-flash-preview \
           -p "$RULES 
           --- CODEBASE --- 
           $CODEBASE 
