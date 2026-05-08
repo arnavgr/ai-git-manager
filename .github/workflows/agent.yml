@@ -15,9 +15,9 @@ jobs:
     steps:
       - name: Notify KV - Processing
         run: |
-          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Reading codebase & Prompting Gemini..."
+          -d "⏳ 2/4: Mapping codebase & Prompting Gemini..."
 
       - name: Checkout Manager (For Rules)
         uses: actions/checkout@v4
@@ -40,41 +40,42 @@ jobs:
         run: |
           RULES=$(cat gemini.md)
           
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          -H "Authorization: Bearer $CF_API_TOKEN" \
+          -d "⏳ 3/4: AI exploring codebase and patching..."
+
           cd target
           
-          # Bundle the entire codebase into one text block for context
-          echo "Building codebase context..."
-          touch codebase_context.txt
-          for f in $(find . -type f -not -path "*/\.git/*" -not -path "*/node_modules/*" -not -name "codebase_context.txt"); do
-            echo "==== FILE: $f ====" >> codebase_context.txt
-            cat "$f" >> codebase_context.txt
-            echo "" >> codebase_context.txt
-          done
+          # Generate a lightweight map of the repository
+          TREE=$(find . -type f -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
           
-          CODEBASE=$(cat codebase_context.txt)
-          rm codebase_context.txt
+          # Inject README for immediate context without requiring a tool call
+          if [ -f README.md ]; then
+            README_CONTENT=$(cat README.md)
+          else
+            README_CONTENT="No README found."
+          fi
 
-          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: Generating and applying patches..."
-
-          # Run Gemini. We pipe the output directly to a shell script.
-          gemini --skip-trust --yolo -m gemini-3.1-flash-lite-preview -p "$RULES 
-          --- CODEBASE --- 
-          $CODEBASE 
+          # Run Gemini WITH agentic tools enabled
+          gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
+          --tools run_shell_command,google_web_search \
+          -p "$RULES 
+          --- REPO MAP --- 
+          $TREE 
+          --- README CONTEXT ---
+          $README_CONTENT
           --- USER PROMPT --- 
           $USER_PROMPT" > ../execute_changes.sh
           
           cd ..
-          # Strip accidental markdown fences just in case the AI hallucinates them
           sed -i '/^```/d' execute_changes.sh
           
           echo "--- Generated Script ---"
           cat execute_changes.sh
           
-          # Apply the changes
           cd target
-          bash ../execute_changes.sh
+          # Apply the changes and catch failures
+          bash ../execute_changes.sh || { echo "EXEC_FAIL=true" >> $GITHUB_ENV; exit 1; }
 
       - name: Commit and Push
         working-directory: ./target
@@ -82,16 +83,13 @@ jobs:
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
           
-          # Clean up the backup files patch creates
           rm -f *.orig *.rej
-          
           git add .
           
           if git diff-index --quiet HEAD; then
             echo "No changes made."
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
-            # Extract the AI-generated commit message
             if [ -f commit_msg.txt ]; then
               COMMIT_MSG=$(cat commit_msg.txt)
               rm commit_msg.txt
@@ -111,10 +109,9 @@ jobs:
           if [ "${{ job.status }}" == "success" ]; then
              STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
-             STATUS_MSG="❌ Failed: The patch or bash execution crashed. Check logs."
+             STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
           fi
           
-          # Using environment variables directly to prevent malformed URL interpolation
-          curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "$STATUS_MSG"
