@@ -12,7 +12,6 @@ jobs:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}   # FIX 2: Use $CF_API_TOKEN everywhere, not ${{ secrets.* }} mid-script
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      NODE_OPTIONS: "--max-listeners=20"          # FIX 3: Kills the MaxListenersExceededWarning
 
     steps:
       - name: Notify KV - Processing
