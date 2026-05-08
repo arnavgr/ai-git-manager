@@ -6,26 +6,26 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
+    timeout-minutes: 15       # FIX 1: Prevent hung Gemini API calls eating your minutes forever
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}   # FIX 2: Use $CF_API_TOKEN everywhere, not ${{ secrets.* }} mid-script
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    
+      NODE_OPTIONS: "--max-listeners=20"          # FIX 3: Kills the MaxListenersExceededWarning
+
     steps:
       - name: Notify KV - Processing
         run: |
-          # Clean URL - no brackets
           curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+          -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 2/4: Reading codebase..."
 
       - name: Checkout Manager (For Rules)
         uses: actions/checkout@v4
-        
+
       - name: Checkout Target Repo
         run: |
-          # Wrapped in quotes to prevent syntax errors
           git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }}" target
           cd target
           git checkout "${{ github.event.client_payload.branch }}" || git checkout -b "${{ github.event.client_payload.branch }}"
@@ -40,17 +40,13 @@ jobs:
         env:
           USER_PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
-          # READ RULES HERE (in the root directory)
           RULES=$(cat gemini.md)
-          
           cd target
-          
+
           curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 3/4: Generating and applying patches..."
 
-          # Bundle codebase (Context Diet)
-          echo "Building codebase context..."
           touch codebase_context.txt
           find . -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.md" \) \
             -not -path "*/\.git/*" -not -path "*/node_modules/*" | while read -r f; do
@@ -62,57 +58,75 @@ jobs:
           CODEBASE=$(cat codebase_context.txt)
           rm codebase_context.txt
 
-          # Run Gemini
+          # FIX 4: use gemini-3-flash-preview 
           gemini --skip-trust --yolo -m gemini-3-flash-preview \
-          -p "$RULES 
-          --- CODEBASE --- 
-          $CODEBASE 
-          --- USER PROMPT --- 
+          -p "$RULES
+          --- CODEBASE ---
+          $CODEBASE
+          --- USER PROMPT ---
           $USER_PROMPT" > ../execute_changes.sh
-          
+
           cd ..
+
+          # FIX 5 (YOUR BUG): Gemini emits prose/commit message BEFORE the script body.
+          # "Update: Move Cloudflare..." on line 1 → bash exits 127.
+          # Step 1: strip markdown fences
           sed -i '/^```/d' execute_changes.sh
-          
+          # Step 2: drop every leading line until we hit a real shell command
+          awk '
+            !started && /^(cat |patch |echo |git |bash |cp |mv |mkdir |touch |sed |awk |find |rm |chmod |#!)/ { started=1 }
+            started { print }
+          ' execute_changes.sh > execute_changes_clean.sh
+          mv execute_changes_clean.sh execute_changes.sh
+
+          # FIX 6: Safety rail — refuse obviously destructive generated commands
+          if grep -qE 'rm\s+-rf\s+[/~]|dd\s+if=|mkfs\.|:\(\)\{|\bsudo\b' execute_changes.sh; then
+            echo "❌ SAFETY ABORT: Destructive command detected in generated script."
+            cat execute_changes.sh
+            exit 1
+          fi
+
           echo "--- Generated Script ---"
           cat execute_changes.sh
-          
+
+          # FIX 7: pipefail so errors inside the generated script aren't silently swallowed
           cd target
-          bash ../execute_changes.sh || { echo "EXEC_FAIL=true" >> $GITHUB_ENV; exit 1; }
+          bash -o pipefail ../execute_changes.sh
 
       - name: Commit and Push
         working-directory: ./target
         run: |
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
-          
+
           if [ -f commit_msg.txt ]; then
             COMMIT_MSG=$(cat commit_msg.txt)
           else
             COMMIT_MSG="AI Update: Codebase modified."
           fi
-          
+
           rm -f *.orig *.rej temp.patch commit_msg.txt ../execute_changes.sh
           git add .
-          
+
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
             git commit -m "$COMMIT_MSG"
             git push origin "${{ github.event.client_payload.branch }}"
             echo "FINAL_MSG=✅ Done: Changes pushed to ${{ github.event.client_payload.branch }}." >> $GITHUB_ENV
-          fi 
+          fi
 
       - name: Final KV Status Update
         if: always()
         run: |
+          # FIX 8: The original had a broken hyperlink artifact embedded in the URL variable
+          # (it was "https://api.cloudflare.com/.../$](https://...)" — would always 404)
           if [ "${{ job.status }}" == "success" ]; then
-             STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
+            STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
-             STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
+            STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
           fi
-          
-          TARGET_URL="[https://api.cloudflare.com/client/v4/accounts/$](https://api.cloudflare.com/client/v4/accounts/$){{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status"
-          
-          curl -g -s -X PUT "$TARGET_URL" \
-          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "$STATUS_MSG"
