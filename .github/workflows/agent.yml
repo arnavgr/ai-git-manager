@@ -58,7 +58,6 @@ jobs:
 
           # Run Gemini WITH agentic tools enabled
           gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
-          --tools run_shell_command,google_web_search \
           -p "$RULES 
           --- REPO MAP --- 
           $TREE 
