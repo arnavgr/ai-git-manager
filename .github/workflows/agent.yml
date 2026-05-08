@@ -15,10 +15,10 @@ jobs:
     steps:
       - name: Notify KV - Processing
         run: |
-          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Reading codebase & Prompting Gemini..."
-
+          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+          -d "⏳ 2/4: Reading codebase..."
+      
       - name: Checkout Target Repo
         run: |
           git clone https://x-access-token:${{ secrets.GH_PAT }}@[github.com/$](https://github.com/$){{ github.event.client_payload.repo }} target
