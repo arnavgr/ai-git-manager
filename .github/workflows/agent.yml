@@ -15,16 +15,20 @@ jobs:
     steps:
       - name: Notify KV - Processing
         run: |
+          # Clean URL - no brackets
           curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
           -d "⏳ 2/4: Reading codebase..."
-      
+
+      - name: Checkout Manager (For Rules)
+        uses: actions/checkout@v4
+        
       - name: Checkout Target Repo
         run: |
-          # STRIPPED MARKDOWN LINK HERE. WRAPPED IN QUOTES.
+          # Wrapped in quotes to prevent syntax errors
           git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }}" target
           cd target
-          git checkout ${{ github.event.client_payload.branch }} || git checkout -b ${{ github.event.client_payload.branch }}
+          git checkout "${{ github.event.client_payload.branch }}" || git checkout -b "${{ github.event.client_payload.branch }}"
 
       - name: Setup Node & Install Gemini CLI
         uses: actions/setup-node@v4
@@ -36,20 +40,20 @@ jobs:
         env:
           USER_PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
-          cd target
+          # READ RULES HERE (in the root directory)
           RULES=$(cat gemini.md)
           
-          # STRIPPED MARKDOWN LINK HERE.
+          cd target
+          
           curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 3/4: Generating and applying patches..."
 
-          # Bundle codebase safely (The "Context Diet")
+          # Bundle codebase (Context Diet)
           echo "Building codebase context..."
           touch codebase_context.txt
           find . -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.md" \) \
             -not -path "*/\.git/*" -not -path "*/node_modules/*" | while read -r f; do
-            # Explicitly skip lockfiles to save tokens
             if [[ "$f" == *"package-lock.json"* ]]; then continue; fi
             echo "==== FILE: $f ====" >> codebase_context.txt
             cat "$f" >> codebase_context.txt
@@ -58,6 +62,7 @@ jobs:
           CODEBASE=$(cat codebase_context.txt)
           rm codebase_context.txt
 
+          # Run Gemini
           gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
           -p "$RULES 
           --- CODEBASE --- 
@@ -80,24 +85,20 @@ jobs:
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
           
-          # Read AI commit message safely
           if [ -f commit_msg.txt ]; then
             COMMIT_MSG=$(cat commit_msg.txt)
           else
             COMMIT_MSG="AI Update: Codebase modified."
           fi
           
-          # THE GARBAGE COLLECTOR: Nuke all possible AI leftovers before git add
           rm -f *.orig *.rej temp.patch commit_msg.txt ../execute_changes.sh
-          
           git add .
           
           if git diff-index --quiet HEAD; then
-            echo "No changes made."
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
             git commit -m "$COMMIT_MSG"
-            git push origin ${{ github.event.client_payload.branch }}
+            git push origin "${{ github.event.client_payload.branch }}"
             echo "FINAL_MSG=✅ Done: Changes pushed to ${{ github.event.client_payload.branch }}." >> $GITHUB_ENV
           fi 
 
@@ -110,7 +111,6 @@ jobs:
              STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
           fi
           
-          # Use GitHub secrets directly to prevent environment variables from dropping
           TARGET_URL="[https://api.cloudflare.com/client/v4/accounts/$](https://api.cloudflare.com/client/v4/accounts/$){{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status"
           
           curl -g -s -X PUT "$TARGET_URL" \
