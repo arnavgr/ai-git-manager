@@ -15,16 +15,13 @@ jobs:
     steps:
       - name: Notify KV - Processing
         run: |
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Mapping codebase & Prompting Gemini..."
+          -d "⏳ 2/4: Reading codebase & Prompting Gemini..."
 
-      - name: Checkout Manager (For Rules)
-        uses: actions/checkout@v4
-        
       - name: Checkout Target Repo
         run: |
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }} target
+          git clone https://x-access-token:${{ secrets.GH_PAT }}@[github.com/$](https://github.com/$){{ github.event.client_payload.repo }} target
           cd target
           git checkout ${{ github.event.client_payload.branch }} || git checkout -b ${{ github.event.client_payload.branch }}
 
@@ -38,31 +35,31 @@ jobs:
         env:
           USER_PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
+          cd target
           RULES=$(cat gemini.md)
           
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: AI exploring codebase and patching..."
+          -d "⏳ 3/4: Generating and applying patches..."
 
-          cd target
-          
-          # Generate a lightweight map of the repository
-          TREE=$(find . -type f -not -path "*/\.git/*" -not -path "*/node_modules/*" | sort)
-          
-          # Inject README for immediate context without requiring a tool call
-          if [ -f README.md ]; then
-            README_CONTENT=$(cat README.md)
-          else
-            README_CONTENT="No README found."
-          fi
+          # Bundle codebase safely (The "Context Diet")
+          echo "Building codebase context..."
+          touch codebase_context.txt
+          find . -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.md" \) \
+            -not -path "*/\.git/*" -not -path "*/node_modules/*" | while read -r f; do
+            # Explicitly skip lockfiles to save tokens
+            if [[ "$f" == *"package-lock.json"* ]]; then continue; fi
+            echo "==== FILE: $f ====" >> codebase_context.txt
+            cat "$f" >> codebase_context.txt
+            echo "" >> codebase_context.txt
+          done
+          CODEBASE=$(cat codebase_context.txt)
+          rm codebase_context.txt
 
-          # Run Gemini WITH agentic tools enabled
           gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
           -p "$RULES 
-          --- REPO MAP --- 
-          $TREE 
-          --- README CONTEXT ---
-          $README_CONTENT
+          --- CODEBASE --- 
+          $CODEBASE 
           --- USER PROMPT --- 
           $USER_PROMPT" > ../execute_changes.sh
           
@@ -73,7 +70,6 @@ jobs:
           cat execute_changes.sh
           
           cd target
-          # Apply the changes and catch failures
           bash ../execute_changes.sh || { echo "EXEC_FAIL=true" >> $GITHUB_ENV; exit 1; }
 
       - name: Commit and Push
@@ -82,23 +78,24 @@ jobs:
           git config user.name "Gemini Agent"
           git config user.email "agent@arnavgr.com"
           
-          rm -f *.orig *.rej
+          # Read AI commit message safely
+          if [ -f commit_msg.txt ]; then
+            COMMIT_MSG=$(cat commit_msg.txt)
+          else
+            COMMIT_MSG="AI Update: Codebase modified."
+          fi
+          
+          # THE GARBAGE COLLECTOR: Nuke all possible AI leftovers before git add
+          rm -f *.orig *.rej temp.patch commit_msg.txt ../execute_changes.sh
+          
           git add .
           
           if git diff-index --quiet HEAD; then
             echo "No changes made."
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
-            if [ -f commit_msg.txt ]; then
-              COMMIT_MSG=$(cat commit_msg.txt)
-              rm commit_msg.txt
-            else
-              COMMIT_MSG="AI Update: Codebase modified."
-            fi
-            
             git commit -m "$COMMIT_MSG"
             git push origin ${{ github.event.client_payload.branch }}
-            
             echo "FINAL_MSG=✅ Done: Changes pushed to ${{ github.event.client_payload.branch }}." >> $GITHUB_ENV
           fi 
 
@@ -111,6 +108,9 @@ jobs:
              STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
           fi
           
-          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
+          # Use GitHub secrets directly to prevent environment variables from dropping
+          TARGET_URL="https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.KV_NAMESPACE_ID }}/values/agent_status"
+          
+          curl -g -s -X PUT "$TARGET_URL" \
+          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
           -d "$STATUS_MSG"
