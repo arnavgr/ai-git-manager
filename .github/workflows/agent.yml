@@ -57,8 +57,8 @@ jobs:
           CODEBASE=$(cat codebase_context.txt)
           rm codebase_context.txt
 
-          # FIX 4: use gemini-3-flash-preview 
-          gemini --skip-trust --yolo -m gemini-3-flash-preview \
+          # FIX 4: use gemini-3.1-flash-lite 
+          gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
           -p "$RULES
           --- CODEBASE ---
           $CODEBASE
