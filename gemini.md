@@ -47,4 +47,4 @@ echo "Update: [Brief summary of changes]" > commit_msg.txt
 - The FIRST character of your output must be the start of a bash command.
 - NEVER output `git` commands (`git checkout`, `git add`, etc). The pipeline handles all git operations automatically.
 - NEVER rewrite whole files. ALWAYS use the patch or sed method above.
-- NEVER use `rm -rf /`, `sudo`, `dd`, `mkfs`, or fork bombs.
+- NEVER use `rm -rf /`, `sudo`, `dd`, `mkfs`, or fork bomb.
