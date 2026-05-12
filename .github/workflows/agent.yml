@@ -28,7 +28,7 @@ jobs:
       # 🚀 OpenClaude Native Gemini Setup
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.1-flash-lite # Ensure you use the most capable Flash version
+      GEMINI_MODEL: gemini-3.1-flash-lite
 
     steps:
       - name: Notify KV - Booting Agent
@@ -50,7 +50,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install -g @gitlawb/openclaude
+      - run: |
+          npm install -g @gitlawb/openclaude
+          
+          # 🛠️ Fix model metadata warning for gemini-3.1-flash-lite
+          MODEL_FILE=$(npm list -g --parseable @gitlawb/openclaude)/dist/integrations/models/google.js
+          if [ -f "$MODEL_FILE" ]; then
+            echo "Patching OpenClaude model metadata for 1M context window..."
+            sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
+          fi
 
       - name: Execute Agentic Changes
         env:
@@ -63,7 +71,6 @@ jobs:
           -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
 
           # 🚀 Run OpenClaude headlessly.
-          # --dangerously-skip-permissions tells it not to wait for human Y/N terminal inputs
           openclaude -p "$USER_PROMPT" --dangerously-skip-permissions
 
       - name: Commit and Push
@@ -74,7 +81,6 @@ jobs:
 
           TARGET_BRANCH="${{ github.event.inputs.branch }}"
 
-          # OpenClaude edits files directly, no cleanup scripts needed
           git add .
 
           if git diff-index --quiet HEAD; then
@@ -93,5 +99,5 @@ jobs:
           else
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
-
+          
           curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
