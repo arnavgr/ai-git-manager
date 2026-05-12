@@ -2,6 +2,21 @@ name: Gemini Coding Agent
 on:
   repository_dispatch:
     types: [ai_cmd]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'User Prompt'
+        required: true
+        type: string
+      repo:
+        description: 'Target Repo'
+        required: true
+        type: string
+      branch:
+        description: 'Target Branch'
+        required: false
+        default: 'main'
+        type: string
 
 jobs:
   execute:
@@ -25,9 +40,13 @@ jobs:
 
       - name: Checkout Target Repo
         run: |
-          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.event.client_payload.repo }}" target
+          # Use fallback logic to support both event types
+          TARGET_REPO="${{ github.event.inputs.repo || github.event.client_payload.repo }}"
+          TARGET_BRANCH="${{ github.event.inputs.branch || github.event.client_payload.branch }}"
+          
+          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/$TARGET_REPO" target
           cd target
-          git checkout "${{ github.event.client_payload.branch }}" || git checkout -b "${{ github.event.client_payload.branch }}"
+          git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
 
       - name: Setup Node & Install Gemini CLI
         uses: actions/setup-node@v4
@@ -37,7 +56,7 @@ jobs:
 
       - name: Execute Agentic Changes
         env:
-          USER_PROMPT: ${{ github.event.client_payload.prompt }}
+          USER_PROMPT: ${{ github.event.inputs.prompt || github.event.client_payload.prompt }}
         run: |
           RULES=$(cat gemini.md)
           cd target
@@ -57,7 +76,6 @@ jobs:
           CODEBASE=$(cat codebase_context.txt)
           rm codebase_context.txt
 
-          # FIX 4: use gemini-3.1-flash-lite 
           gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
           -p "$RULES
           --- CODEBASE ---
@@ -67,8 +85,6 @@ jobs:
 
           cd ..
 
-          # FIX 5 (YOUR BUG): Gemini emits prose/commit message BEFORE the script body.
-          # "Update: Move Cloudflare..." on line 1 → bash exits 127.
           # Step 1: strip markdown fences
           sed -i '/^```/d' execute_changes.sh
           # Step 2: drop every leading line until we hit a real shell command
@@ -78,7 +94,6 @@ jobs:
           ' execute_changes.sh > execute_changes_clean.sh
           mv execute_changes_clean.sh execute_changes.sh
 
-          # FIX 6: Safety rail — refuse obviously destructive generated commands
           if grep -qE 'rm\s+-rf\s+[/~]|dd\s+if=|mkfs\.|:\(\)\{|\bsudo\b' execute_changes.sh; then
             echo "❌ SAFETY ABORT: Destructive command detected in generated script."
             cat execute_changes.sh
@@ -88,7 +103,6 @@ jobs:
           echo "--- Generated Script ---"
           cat execute_changes.sh
 
-          # FIX 7: pipefail so errors inside the generated script aren't silently swallowed
           cd target
           bash -o pipefail ../execute_changes.sh
 
@@ -104,6 +118,8 @@ jobs:
             COMMIT_MSG="AI Update: Codebase modified."
           fi
 
+          TARGET_BRANCH="${{ github.event.inputs.branch || github.event.client_payload.branch }}"
+
           rm -f *.orig *.rej temp.patch commit_msg.txt ../execute_changes.sh
           git add .
 
@@ -111,21 +127,19 @@ jobs:
             echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
           else
             git commit -m "$COMMIT_MSG"
-            git push origin "${{ github.event.client_payload.branch }}"
-            echo "FINAL_MSG=✅ Done: Changes pushed to ${{ github.event.client_payload.branch }}." >> $GITHUB_ENV
+            git push origin "$TARGET_BRANCH"
+            echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
           fi
 
       - name: Final KV Status Update
         if: always()
         run: |
-          # FIX 8: The original had a broken hyperlink artifact embedded in the URL variable
-          # (it was "https://api.cloudflare.com/.../$](https://...)" — would always 404)
           if [ "${{ job.status }}" == "success" ]; then
             STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
             STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
           fi
 
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "$STATUS_MSG"

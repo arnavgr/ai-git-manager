@@ -89,8 +89,12 @@ export async function onRequest(context) {
 
     await env.AGENT_KV.put("agent_status", "⏳ 1/4: Action Triggered...");
 
+    // NEW: Determine which branch of the MANAGER repo to run
+    // Falls back to "main" if the env var isn't set.
+    const managerBranch = env.MANAGER_BRANCH || "main"; 
+
     const res = await fetch(
-      `https://api.github.com/repos/${env.GH_USER}/${env.MANAGER_REPO}/dispatches`,
+      `https://api.github.com/repos/${env.GH_USER}/${env.MANAGER_REPO}/actions/workflows/agent.yml/dispatches`,
       {
         method: "POST",
         headers: {
@@ -99,8 +103,8 @@ export async function onRequest(context) {
           "User-Agent": "CF-Worker-Agent"
         },
         body: JSON.stringify({
-          event_type: "ai_cmd",
-          client_payload: { prompt, repo, branch }
+          ref: managerBranch, // Targets the specific branch (main or testing)
+          inputs: { prompt, repo, branch }
         })
       }
     );
