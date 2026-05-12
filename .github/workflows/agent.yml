@@ -28,7 +28,7 @@ jobs:
       # 🚀 OpenClaude Native Gemini Setup
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.1-flash # Ensure you use the most capable Flash version
+      GEMINI_MODEL: gemini-3.1-flash-lite # Ensure you use the most capable Flash version
 
     steps:
       - name: Notify KV - Booting Agent
