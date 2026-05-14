@@ -55,16 +55,21 @@ jobs:
         run: |
           npm install -g @gitlawb/openclaude
           
-          # 🛠️ Dynamically find the google.js file to guarantee the 1M token patch works
-          OPENCLAUDE_DIR="$(npm root -g)/@gitlawb/openclaude"
-          MODEL_FILE=$(find "$OPENCLAUDE_DIR" -type f -name "google.js" | head -n 1)
+          # 🛠️ The "Track and Patch" Method
+          # Find the exact executable path, trace back to the actual library folder,
+          # and inject the 1M token limit for 3.1-flash-lite wherever 1.5-flash exists.
           
-          if [ -n "$MODEL_FILE" ]; then
-            echo "Found model file at $MODEL_FILE. Patching for 1M context window..."
+          echo "Hunting for OpenClaude real installation path..."
+          BIN_PATH=$(which openclaude)
+          REAL_BIN=$(readlink -f "$BIN_PATH")
+          PACKAGE_DIR=$(dirname $(dirname "$REAL_BIN"))
+          
+          echo "Package firmly located at: $PACKAGE_DIR"
+          
+          find "$PACKAGE_DIR" -type f -name "*.js" -exec grep -l "gemini-1.5-flash" {} \; | while read -r MODEL_FILE; do
+            echo "Patching model metadata in: $MODEL_FILE"
             sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
-          else
-            echo "⚠️ ERROR: Could not locate google.js to apply token patch."
-          fi
+          done 
 
       - name: Execute Agentic Changes
         run: |
