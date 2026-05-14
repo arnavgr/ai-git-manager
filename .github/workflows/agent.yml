@@ -25,12 +25,10 @@ jobs:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
       
-      # 🚀 OpenClaude Native Gemini Setup
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: gemini-3.1-flash-lite
       
-      # 🌍 Globally available variables for all steps
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
       TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
@@ -51,17 +49,21 @@ jobs:
       - name: Setup Node & Install OpenClaude
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: |
+          node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
+          
+      - name: Install & Patch OpenClaude
+        run: |
           npm install -g @gitlawb/openclaude
           
-          # 🛠️ Fix model metadata warning with absolute pathing
-          MODEL_FILE="$(npm root -g)/@gitlawb/openclaude/dist/integrations/models/google.js"
-          if [ -f "$MODEL_FILE" ]; then
-            echo "Patching OpenClaude model metadata for 1M context window..."
+          # 🛠️ Dynamically find the google.js file to guarantee the 1M token patch works
+          OPENCLAUDE_DIR="$(npm root -g)/@gitlawb/openclaude"
+          MODEL_FILE=$(find "$OPENCLAUDE_DIR" -type f -name "google.js" | head -n 1)
+          
+          if [ -n "$MODEL_FILE" ]; then
+            echo "Found model file at $MODEL_FILE. Patching for 1M context window..."
             sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
           else
-            echo "⚠️ Warning: Could not find google.js at $MODEL_FILE"
+            echo "⚠️ ERROR: Could not locate google.js to apply token patch."
           fi
 
       - name: Execute Agentic Changes
@@ -72,8 +74,10 @@ jobs:
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
 
-          # 🚀 Run OpenClaude headlessly.
-          openclaude -p "$USER_PROMPT" --dangerously-skip-permissions
+          # 🚀 Tell the agent to write its own commit message
+          INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
+          
+          openclaude -p "$INSTRUCTION" --dangerously-skip-permissions
 
       - name: Commit and Push
         working-directory: ./target
@@ -86,8 +90,16 @@ jobs:
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
-            # 📝 $USER_PROMPT is now globally available, so this will work perfectly
-            git commit -m "AI Update: $USER_PROMPT"
+            # 📝 Check if the agent successfully wrote the commit message file
+            if [ -f commit_msg.txt ]; then
+              echo "Using AI-generated commit message."
+              git commit -F commit_msg.txt
+              rm commit_msg.txt
+            else
+              echo "Fallback commit message."
+              git commit -m "AI Update: $USER_PROMPT"
+            fi
+            
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
           fi
@@ -101,5 +113,4 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
           
-          # 🤫 Added -o /dev/null to silence the JSON output
           curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
