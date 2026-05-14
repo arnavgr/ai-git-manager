@@ -29,19 +29,21 @@ jobs:
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: gemini-3.1-flash-lite
+      
+      # 🌍 Globally available variables for all steps
+      USER_PROMPT: ${{ github.event.inputs.prompt }}
+      TARGET_REPO: ${{ github.event.inputs.repo }}
+      TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
 
     steps:
       - name: Notify KV - Booting Agent
         run: |
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 2/4: Initializing OpenClaude agent..."
 
       - name: Checkout Target Repo
         run: |
-          TARGET_REPO="${{ github.event.inputs.repo }}"
-          TARGET_BRANCH="${{ github.event.inputs.branch }}"
-          
           git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/$TARGET_REPO" target
           cd target
           git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
@@ -53,20 +55,20 @@ jobs:
       - run: |
           npm install -g @gitlawb/openclaude
           
-          # 🛠️ Fix model metadata warning for gemini-3.1-flash-lite
-          MODEL_FILE=$(npm list -g --parseable @gitlawb/openclaude)/dist/integrations/models/google.js
+          # 🛠️ Fix model metadata warning with absolute pathing
+          MODEL_FILE="$(npm root -g)/@gitlawb/openclaude/dist/integrations/models/google.js"
           if [ -f "$MODEL_FILE" ]; then
             echo "Patching OpenClaude model metadata for 1M context window..."
             sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
+          else
+            echo "⚠️ Warning: Could not find google.js at $MODEL_FILE"
           fi
 
       - name: Execute Agentic Changes
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
         run: |
           cd target
 
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
           -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
 
@@ -79,13 +81,12 @@ jobs:
           git config user.name "OpenClaude Agent"
           git config user.email "agent@arnavgr.com"
 
-          TARGET_BRANCH="${{ github.event.inputs.branch }}"
-
           git add .
 
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
+            # 📝 $USER_PROMPT is now globally available, so this will work perfectly
             git commit -m "AI Update: $USER_PROMPT"
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
@@ -100,4 +101,5 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
           
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
+          # 🤫 Added -o /dev/null to silence the JSON output
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
