@@ -90,16 +90,20 @@ jobs:
           git config user.name "OpenClaude Agent"
           git config user.email "agent@arnavgr.com"
 
+          # 📝 FIX: Move the commit message OUT of the repo before staging files
+          if [ -f commit_msg.txt ]; then
+            mv commit_msg.txt ../commit_msg.txt
+          fi
+
           git add .
 
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
-            # 📝 Check if the agent successfully wrote the commit message file
-            if [ -f commit_msg.txt ]; then
+            # 📝 Reference the moved file for the commit
+            if [ -f ../commit_msg.txt ]; then
               echo "Using AI-generated commit message."
-              git commit -F commit_msg.txt
-              rm commit_msg.txt
+              git commit -F ../commit_msg.txt
             else
               echo "Fallback commit message."
               git commit -m "AI Update: $USER_PROMPT"
@@ -107,8 +111,7 @@ jobs:
             
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
-          fi
-
+          fi 
       - name: Final KV Status Update
         if: always()
         run: |
