@@ -1,7 +1,5 @@
-name: Gemini Coding Agent
+name: OpenClaude Coding Agent
 on:
-  repository_dispatch:
-    types: [ai_cmd]
   workflow_dispatch:
     inputs:
       prompt:
@@ -21,122 +19,106 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    timeout-minutes: 15       # FIX 1: Prevent hung Gemini API calls eating your minutes forever
+    timeout-minutes: 20       
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}   # FIX 2: Use $CF_API_TOKEN everywhere, not ${{ secrets.* }} mid-script
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+      
+      CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-3.1-flash-lite
+      
+      USER_PROMPT: ${{ github.event.inputs.prompt }}
+      TARGET_REPO: ${{ github.event.inputs.repo }}
+      TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
 
     steps:
-      - name: Notify KV - Processing
+      - name: Notify KV - Booting Agent
         run: |
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Reading codebase..."
-
-      - name: Checkout Manager (For Rules)
-        uses: actions/checkout@v4
+          -d "⏳ 2/4: Initializing OpenClaude agent..."
 
       - name: Checkout Target Repo
         run: |
-          # Use fallback logic to support both event types
-          TARGET_REPO="${{ github.event.inputs.repo || github.event.client_payload.repo }}"
-          TARGET_BRANCH="${{ github.event.inputs.branch || github.event.client_payload.branch }}"
-          
           git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/$TARGET_REPO" target
           cd target
           git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
 
-      - name: Setup Node & Install Gemini CLI
+      - name: Setup Node & Install OpenClaude
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install -g @google/gemini-cli
+          node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
+          
+      - name: Install & Patch OpenClaude
+        run: |
+          npm install -g @gitlawb/openclaude
+          
+          # 🛠️ The "Track and Patch" Method
+          # Find the exact executable path, trace back to the actual library folder,
+          # and inject the 1M token limit for 3.1-flash-lite wherever 1.5-flash exists.
+          
+          echo "Hunting for OpenClaude real installation path..."
+          BIN_PATH=$(which openclaude)
+          REAL_BIN=$(readlink -f "$BIN_PATH")
+          PACKAGE_DIR=$(dirname $(dirname "$REAL_BIN"))
+          
+          echo "Package firmly located at: $PACKAGE_DIR"
+          
+          find "$PACKAGE_DIR" -type f -name "*.js" -exec grep -l "gemini-1.5-flash" {} \; | while read -r MODEL_FILE; do
+            echo "Patching model metadata in: $MODEL_FILE"
+            sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
+          done 
 
       - name: Execute Agentic Changes
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt || github.event.client_payload.prompt }}
         run: |
-          RULES=$(cat gemini.md)
           cd target
 
-          curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: Generating and applying patches..."
+          -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
 
-          touch codebase_context.txt
-          find . -type f \( -name "*.html" -o -name "*.js" -o -name "*.css" -o -name "*.md" \) \
-            -not -path "*/\.git/*" -not -path "*/node_modules/*" | while read -r f; do
-            if [[ "$f" == *"package-lock.json"* ]]; then continue; fi
-            echo "==== FILE: $f ====" >> codebase_context.txt
-            cat "$f" >> codebase_context.txt
-            echo "" >> codebase_context.txt
-          done
-          CODEBASE=$(cat codebase_context.txt)
-          rm codebase_context.txt
-
-          gemini --skip-trust --yolo -m gemini-3.1-flash-lite \
-          -p "$RULES
-          --- CODEBASE ---
-          $CODEBASE
-          --- USER PROMPT ---
-          $USER_PROMPT" > ../execute_changes.sh
-
-          cd ..
-
-          # Step 1: strip markdown fences
-          sed -i '/^```/d' execute_changes.sh
-          # Step 2: drop every leading line until we hit a real shell command
-          awk '
-            !started && /^(cat |patch |echo |git |bash |cp |mv |mkdir |touch |sed |awk |find |rm |chmod |#!)/ { started=1 }
-            started { print }
-          ' execute_changes.sh > execute_changes_clean.sh
-          mv execute_changes_clean.sh execute_changes.sh
-
-          if grep -qE 'rm\s+-rf\s+[/~]|dd\s+if=|mkfs\.|:\(\)\{|\bsudo\b' execute_changes.sh; then
-            echo "❌ SAFETY ABORT: Destructive command detected in generated script."
-            cat execute_changes.sh
-            exit 1
-          fi
-
-          echo "--- Generated Script ---"
-          cat execute_changes.sh
-
-          cd target
-          bash -o pipefail ../execute_changes.sh
+          # 🚀 Tell the agent to write its own commit message
+          INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
+          
+          openclaude -p "$INSTRUCTION" --dangerously-skip-permissions
 
       - name: Commit and Push
         working-directory: ./target
         run: |
-          git config user.name "Gemini Agent"
+          git config user.name "OpenClaude Agent"
           git config user.email "agent@arnavgr.com"
 
+          # 📝 FIX: Move the commit message OUT of the repo before staging files
           if [ -f commit_msg.txt ]; then
-            COMMIT_MSG=$(cat commit_msg.txt)
-          else
-            COMMIT_MSG="AI Update: Codebase modified."
+            mv commit_msg.txt ../commit_msg.txt
           fi
 
-          TARGET_BRANCH="${{ github.event.inputs.branch || github.event.client_payload.branch }}"
-
-          rm -f *.orig *.rej temp.patch commit_msg.txt ../execute_changes.sh
           git add .
 
           if git diff-index --quiet HEAD; then
-            echo "FINAL_MSG=❌ Finished: No code changes were made." >> $GITHUB_ENV
+            echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
-            git commit -m "$COMMIT_MSG"
+            # 📝 Reference the moved file for the commit
+            if [ -f ../commit_msg.txt ]; then
+              echo "Using AI-generated commit message."
+              git commit -F ../commit_msg.txt
+            else
+              echo "Fallback commit message."
+              git commit -m "AI Update: $USER_PROMPT"
+            fi
+            
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
-          fi
-
+          fi 
       - name: Final KV Status Update
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
             STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
-            STATUS_MSG="❌ Failed: The agent crashed or patch failed. Check GH logs."
+            STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
-curl -g -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
+          
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
