@@ -66,7 +66,7 @@ jobs:
           # 🚀 Tell the agent to write its own commit message
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
           
-          openclaude -p "$INSTRUCTION" --dangerously-skip-permissions
+          openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
 
       - name: Commit and Push
         working-directory: ./target
