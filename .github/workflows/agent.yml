@@ -53,7 +53,7 @@ jobs:
           
       - name: Install OpenClaude
         run: |
-          npm install -g @gitlawb/openclaude@0.16.1
+          npm install -g @gitlawb/openclaude
 
       - name: Execute Agentic Changes
         run: |
