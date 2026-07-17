@@ -28,7 +28,7 @@ jobs:
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: gemini-3.1-flash-lite
-      
+
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
       TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
@@ -51,25 +51,9 @@ jobs:
         with:
           node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
           
-      - name: Install & Patch OpenClaude
+      - name: Install OpenClaude
         run: |
           npm install -g @gitlawb/openclaude
-          
-          # 🛠️ The "Track and Patch" Method
-          # Find the exact executable path, trace back to the actual library folder,
-          # and inject the 1M token limit for 3.1-flash-lite wherever 1.5-flash exists.
-          
-          echo "Hunting for OpenClaude real installation path..."
-          BIN_PATH=$(which openclaude)
-          REAL_BIN=$(readlink -f "$BIN_PATH")
-          PACKAGE_DIR=$(dirname $(dirname "$REAL_BIN"))
-          
-          echo "Package firmly located at: $PACKAGE_DIR"
-          
-          find "$PACKAGE_DIR" -type f -name "*.js" -exec grep -l "gemini-1.5-flash" {} \; | while read -r MODEL_FILE; do
-            echo "Patching model metadata in: $MODEL_FILE"
-            sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
-          done 
 
       - name: Execute Agentic Changes
         run: |
@@ -82,7 +66,7 @@ jobs:
           # 🚀 Tell the agent to write its own commit message
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
           
-          openclaude -p "$INSTRUCTION" --dangerously-skip-permissions
+          openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
 
       - name: Commit and Push
         working-directory: ./target

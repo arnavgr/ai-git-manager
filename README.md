@@ -1,4 +1,4 @@
-# ai-git-manager (or preferred name)
+# ai-git-manager 
 
 A zero-local-compute, headless AI coding agent. 
 
@@ -9,7 +9,7 @@ This project allows you to dispatch complex, autonomous code refactoring tasks t
 The system operates across a dual-tier cloud architecture:
 
 1. **The Dispatcher (Cloudflare Pages):** A lightweight HTML interface and routing function (`[[path]].js`) that securely accepts a prompt, validates an HMAC PIN, updates a live KV status database, and triggers the CI pipeline.
-2. **The Surgeon (GitHub Actions):** An `ubuntu-latest` runner equipped with 7GB of RAM that spins up [OpenClaude](https://github.com/gitlawb/openclaude). It clones the target repository, reads the codebase, autonomously writes and verifies the requested code modifications using the `gemini-3.1-flash-lite` model, and pushes the final commits back to the branch.
+2. **The Surgeon (GitHub Actions):** An `ubuntu-latest` runner equipped with 7GB of RAM that spins up [OpenClaude](https://github.com/gitlawb/openclaude). It clones the target repository, reads the codebase, autonomously writes and verifies the requested code modifications using the `gemini-3.5-flash` model, and pushes the final commits back to the branch.
 
 ## Features
 
