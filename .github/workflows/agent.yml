@@ -19,15 +19,29 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    timeout-minutes: 20       
+    # Bumped from 20 -> 25 to leave room for a fallback attempt or two
+    # (checkout + npm install already eats ~1-2 min of the old budget).
+    timeout-minutes: 25
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-      
+
+      # --- Primary provider: Gemini (1M context, best for full-repo edits) ---
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.1-flash-lite
+      GEMINI_MODEL: gemini-3.5-flash
+
+      # --- Fallback #2: OpenRouter (used only if both Gemini models fail) ---
+      # Optional. Leave the repo secret unset to skip this tier entirely.
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: openrouter/free
+
+      # --- Web search backend for the agent itself (optional but recommended) ---
+      # GitHub-hosted runners are exactly the kind of datacenter IP that gets
+      # DuckDuckGo-rate-limited (openclaude's default fallback), so without one
+      # of these set, WebSearch inside the agent run will likely fail silently.
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
 
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
@@ -38,11 +52,13 @@ jobs:
         run: |
           curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Initializing OpenClaude agent..."
+          --data-urlencode "⏳ 2/4: Initializing OpenClaude agent..."
 
       - name: Checkout Target Repo
         run: |
-          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/$TARGET_REPO" target
+          # FIX: Prevents GH_PAT from leaking in logs if the clone fails
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git clone "https://github.com/$TARGET_REPO" target
           cd target
           git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
 
@@ -50,7 +66,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
-          
+
       - name: Install OpenClaude
         run: |
           npm install -g @gitlawb/openclaude
@@ -59,14 +75,64 @@ jobs:
         run: |
           cd target
 
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
+          notify() {
+            # FIX: --data-urlencode prevents '&' or '=' in commit messages from breaking the KV payload
+            curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
+              -H "Authorization: Bearer $CF_API_TOKEN" --data-urlencode "$1" || true
+          }
 
           # 🚀 Tell the agent to write its own commit message
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
-          
-          openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+
+          # ---- Provider attempts, in priority order ----
+          # 1) Gemini 3.5 Flash: 1M context, best quality, tried first.
+          # 2) Gemini 3.1 Flash Lite: Same provider, lighter model fallback.
+          # 3) OpenRouter (free model): only if OPENROUTER_API_KEY secret is set.
+
+          run_gemini() {
+            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.5 Flash)..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            export CLAUDE_CODE_USE_GEMINI=1
+            export GEMINI_MODEL="gemini-3.5-flash"
+            timeout 14m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            return $?
+          }
+
+          run_gemini_lite() {
+            notify "⏳ 3/4: Gemini 3.5 failed or hit quota — retrying via Gemini 3.1 Flash Lite..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            export CLAUDE_CODE_USE_GEMINI=1
+            export GEMINI_MODEL="gemini-3.1-flash-lite"
+            timeout 8m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            return $?
+          }
+
+          run_openrouter() {
+            notify "⏳ 3/4: Gemini failed or hit quota — retrying via OpenRouter ($OPENROUTER_MODEL)..."
+            unset CLAUDE_CODE_USE_GEMINI
+            export CLAUDE_CODE_USE_OPENAI=1
+            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+            export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+            export OPENAI_MODEL="$OPENROUTER_MODEL"
+            timeout 5m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
+            return $?
+          }
+
+          SUCCESS=0
+
+          if run_gemini; then
+            SUCCESS=1
+          elif run_gemini_lite; then
+            SUCCESS=1
+          elif [ -n "$OPENROUTER_API_KEY" ] && run_openrouter; then
+            SUCCESS=1
+          fi
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            notify "❌ All configured providers failed or hit quota limits."
+            echo "All agent providers failed." >&2
+            exit 1
+          fi
 
       - name: Commit and Push
         working-directory: ./target
@@ -92,10 +158,10 @@ jobs:
               echo "Fallback commit message."
               git commit -m "AI Update: $USER_PROMPT"
             fi
-            
+
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
-          fi 
+          fi
       - name: Final KV Status Update
         if: always()
         run: |
@@ -104,5 +170,6 @@ jobs:
           else
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
-          
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
+
+          # FIX: --data-urlencode prevents payload corruption
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-urlencode "$STATUS_MSG"
