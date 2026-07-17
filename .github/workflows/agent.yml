@@ -38,9 +38,6 @@ jobs:
       OPENROUTER_MODEL: openrouter/free
 
       # --- Web search backend for the agent itself (optional but recommended) ---
-      # GitHub-hosted runners are exactly the kind of datacenter IP that gets
-      # DuckDuckGo-rate-limited (openclaude's default fallback), so without one
-      # of these set, WebSearch inside the agent run will likely fail silently.
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
 
       USER_PROMPT: ${{ github.event.inputs.prompt }}
@@ -52,7 +49,7 @@ jobs:
         run: |
           curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
           -H "Authorization: Bearer $CF_API_TOKEN" \
-          --data-urlencode "⏳ 2/4: Initializing OpenClaude agent..."
+          --data-raw "⏳ 2/4: Initializing OpenClaude agent..."
 
       - name: Checkout Target Repo
         run: |
@@ -63,9 +60,9 @@ jobs:
           git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
 
       - name: Setup Node & Install OpenClaude
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5 # 🛠️ Upgraded to v5 to fix Node 20 runtime deprecation warning
         with:
-          node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
+          node-version: 22
 
       - name: Install OpenClaude
         run: |
@@ -76,9 +73,9 @@ jobs:
           cd target
 
           notify() {
-            # FIX: --data-urlencode prevents '&' or '=' in commit messages from breaking the KV payload
+            # FIX: --data-raw sends the exact string without URL-encoding it
             curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-              -H "Authorization: Bearer $CF_API_TOKEN" --data-urlencode "$1" || true
+              -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$1" || true
           }
 
           # 🚀 Tell the agent to write its own commit message
@@ -171,5 +168,5 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
 
-          # FIX: --data-urlencode prevents payload corruption
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-urlencode "$STATUS_MSG"
+          # FIX: --data-raw prevents payload corruption without URL-encoding it
+          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"
