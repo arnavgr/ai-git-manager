@@ -147,13 +147,40 @@ jobs:
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
-            # 📝 Reference the moved file for the commit
-            if [ -f ../commit_msg.txt ]; then
+            # 🩹 FIX: weaker/cheaper models (common when routing through
+            # OpenRouter) reliably do the coding task but often drop the
+            # secondary "also write commit_msg.txt" instruction entirely.
+            # That silently fell through to `AI Update: $USER_PROMPT` below —
+            # i.e. the raw prompt dumped verbatim as the commit message.
+            # If the agent didn't leave us a message, make one focused,
+            # low-stakes follow-up call whose ONLY job is to summarize the
+            # *actual diff* — not the original task/prompt.
+            if [ ! -s ../commit_msg.txt ]; then
+              echo "No commit_msg.txt from the agent — generating one from the diff instead."
+              DIFF_CONTEXT=$(git diff --cached --stat; echo; git diff --cached | head -c 6000)
+              COMMIT_PROMPT="Write a concise, professional git commit message for this diff. Output ONLY the raw commit message text - no markdown, no code fences, no quotes, no commentary.
+
+$DIFF_CONTEXT"
+              # NOTE: this uses the same --provider flag as the step above.
+              # If your OpenRouter runs actually go through a different
+              # workflow/provider config, mirror that here too.
+              openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+
+              if [ -s ../commit_msg_fallback.txt ]; then
+                # strip stray code fences/quotes some models still add
+                sed -e '/^```/d' -e "s/^['\"]//" -e "s/['\"]\$//" ../commit_msg_fallback.txt > ../commit_msg.txt
+              fi
+            fi
+
+            if [ -s ../commit_msg.txt ]; then
               echo "Using AI-generated commit message."
               git commit -F ../commit_msg.txt
             else
-              echo "Fallback commit message."
-              git commit -m "AI Update: $USER_PROMPT"
+              # True last resort: summarize which files changed. This never
+              # falls back to the raw user prompt again.
+              CHANGED=$(git diff --cached --name-only | tr '\n' ' ')
+              echo "No AI commit message available — falling back to a file list."
+              git commit -m "AI Update: modified ${CHANGED}"
             fi
 
             git push origin "$TARGET_BRANCH"
