@@ -160,7 +160,7 @@ jobs:
               DIFF_CONTEXT=$(git diff --cached --stat; echo; git diff --cached | head -c 6000)
               COMMIT_PROMPT="Write a concise, professional git commit message for this diff. Output ONLY the raw commit message text - no markdown, no code fences, no quotes, no commentary.
 
-$DIFF_CONTEXT"
+              $DIFF_CONTEXT"
               # NOTE: this uses the same --provider flag as the step above.
               # If your OpenRouter runs actually go through a different
               # workflow/provider config, mirror that here too.
