@@ -7,13 +7,13 @@ export async function onRequest(context) {
 
   const ghHeaders = {
     "Authorization": `Bearer ${env.GH_PAT}`,
-    "Accept": "application/vnd.github.v3+json",
+    "Accept": "application/vnd.github+json", // Updated to recommended v3 header
+    "X-GitHub-Api-Version": "2022-11-28", // Enforce modern API version
     "User-Agent": "CF-Worker-Agent"
   };
 
   // =========================================================================
   //  /status — internal KV read
-  //  FIX 2: Added a simple secret-token check so anyone can't poll your KV
   // =========================================================================
   if (url.pathname === "/status") {
     if (url.searchParams.get("token") !== env.AUTH_PIN) {
@@ -27,16 +27,13 @@ export async function onRequest(context) {
 
   // =========================================================================
   //  /log — GET, raw log of the most recent GitHub Actions run
-  //  FIX 5: dumbphone-friendly log viewer (240x320), gated by the same PIN
-  //  token as /status. Fetches job logs via the GitHub API's redirect-to-blob
-  //  endpoint, without forwarding the GH_PAT to the blob host.
   // =========================================================================
   if (url.pathname === "/log" && request.method === "GET") {
     if (url.searchParams.get("token") !== env.AUTH_PIN) {
       return new Response("Forbidden", { status: 403 });
     }
 
-    const MAX_CHARS = 60000; // keep it renderable on very small/slow phone browsers
+    const MAX_CHARS = 60000;
     let body = "";
     let runUrl = "";
 
@@ -67,7 +64,7 @@ export async function onRequest(context) {
             );
             if (raw.status >= 300 && raw.status < 400) {
               const loc = raw.headers.get("location");
-              const blob = await fetch(loc); // pre-signed URL — no GH auth header sent here
+              const blob = await fetch(loc);
               body += await blob.text();
             } else if (raw.ok) {
               body += await raw.text();
@@ -116,7 +113,6 @@ ${runUrl ? `<a href="${esc(runUrl)}" style="color:#aaa;">[ Full log on GitHub ]<
   //  /dispatched — GET only, PRG target
   // =========================================================================
   if (url.pathname === "/dispatched" && request.method === "GET") {
-    // FIX 3: Escape repo and branch before injecting into HTML (XSS)
     const repoRaw   = url.searchParams.get("repo")   || "arnavgr/";
     const branchRaw = url.searchParams.get("branch") || "main";
     const token     = url.searchParams.get("token")  || "";
@@ -127,8 +123,6 @@ ${runUrl ? `<a href="${esc(runUrl)}" style="color:#aaa;">[ Full log on GitHub ]<
     const isDone = currentStatus.includes('✅') || currentStatus.includes('❌');
     const refreshMeta = isDone ? "" : '<meta http-equiv="refresh" content="5">';
 
-    // FIX 6: carry the PIN through as ?token= so /log (and /status) work
-    // without re-prompting. Same trust model as the existing /status check.
     const logHref = `/log?repo=${encodeURIComponent(repoRaw)}&branch=${encodeURIComponent(branchRaw)}&token=${encodeURIComponent(token)}`;
 
     return new Response(`
@@ -164,7 +158,6 @@ ${runUrl ? `<a href="${esc(runUrl)}" style="color:#aaa;">[ Full log on GitHub ]<
     const data = await request.formData();
     const pin = data.get("pin") || "";
 
-    // FIX 4: timing-safe HMAC comparison (crypto.subtle, Works runtime compatible)
     let valid = false;
     try {
       const enc = new TextEncoder();
@@ -184,39 +177,42 @@ ${runUrl ? `<a href="${esc(runUrl)}" style="color:#aaa;">[ Full log on GitHub ]<
 
     if (!valid) return new Response("❌ Bad PIN.", { status: 401 });
 
-    const prompt = data.get("prompt");
-    const repo   = data.get("repo");
-    const branch = data.get("branch") || "main";
+    // Explicit string conversion to meet GitHub API payload requirements
+    const prompt = String(data.get("prompt") || "");
+    const repo   = String(data.get("repo") || "");
+    const branch = String(data.get("branch") || "main");
+
+    // Environment validation checkpoint
+    if (!env.GH_PAT || !env.GH_USER || !env.MANAGER_REPO) {
+      const errorMsg = "❌ Dispatch failed: Missing Cloudflare environment variables (GH_PAT, GH_USER, or MANAGER_REPO).";
+      await env.AGENT_KV.put("agent_status", errorMsg);
+      return new Response(errorMsg, { status: 500 });
+    }
 
     await env.AGENT_KV.put("agent_status", "⏳ 1/4: Action Triggered...");
 
-    // NEW: Determine which branch of the MANAGER repo to run
-    // Falls back to "main" if the env var isn't set.
     const managerBranch = env.MANAGER_BRANCH || "main"; 
 
     const res = await fetch(
       `https://api.github.com/repos/${env.GH_USER}/${env.MANAGER_REPO}/actions/workflows/agent.yml/dispatches`,
       {
         method: "POST",
-        headers: {
-          "Authorization": `Bearer ${env.GH_PAT}`,
-          "Accept": "application/vnd.github.v3+json",
-          "User-Agent": "CF-Worker-Agent"
-        },
+        headers: ghHeaders, // Utilizes updated headers from top of file
         body: JSON.stringify({
-          ref: managerBranch, // Targets the specific branch (main or testing)
+          ref: managerBranch,
           inputs: { prompt, repo, branch }
         })
       }
     );
 
+    // Surface actual API response rather than swallowing it
     if (!res.ok) {
-      await env.AGENT_KV.put("agent_status", `❌ Dispatch failed.`);
-      return new Response(`❌ GitHub dispatch failed`, { status: 500 });
+      const errText = await res.text();
+      const errorMsg = `❌ GitHub API rejected dispatch (HTTP ${res.status}): ${errText}`;
+      await env.AGENT_KV.put("agent_status", errorMsg);
+      return new Response(errorMsg, { status: res.status });
     }
 
-    // FIX 6: pass the (now-validated) PIN through as ?token= so /dispatched
-    // can link to /log and /status without asking again.
     const params = new URLSearchParams({ repo, branch, token: pin });
     return Response.redirect(`${url.origin}/dispatched?${params}`, 303);
   }
