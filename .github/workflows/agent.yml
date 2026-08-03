@@ -19,7 +19,7 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -43,21 +43,28 @@ jobs:
 
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
-      TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
+      TARGET_BRANCH: ${{ github.event.inputs.branch }}
 
     steps:
       - name: Notify KV - Booting Agent
         run: |
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          --data-raw "⏳ 2/4: Initializing OpenClaude agent..."
+          if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "⏳ 2/4: Initializing OpenClaude agent..."; then
+            echo "KV init failed, continuing..."
+          fi
 
       - name: Checkout Target Repo
         run: |
           git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
           git clone "https://github.com/$TARGET_REPO" target
           cd target
-          git checkout "$TARGET_BRANCH" \vert{}\vert{} git checkout -b "$TARGET_BRANCH"
+          
+          if [ -z "$TARGET_BRANCH" ]; then
+            export TARGET_BRANCH="main"
+          fi
+          
+          if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then
+            git checkout -b "$TARGET_BRANCH"
+          fi
 
       - name: Setup Node & Install OpenClaude
         uses: actions/setup-node@v5
@@ -73,8 +80,9 @@ jobs:
           cd target
 
           notify() {
-            curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-              -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$1" || true
+            if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$1"; then
+              echo "KV update failed, continuing..."
+            fi
           }
 
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
@@ -147,10 +155,22 @@ jobs:
             SUCCESS=1
           elif run_gemini_3_1_flash_lite; then
             SUCCESS=1
-          elif [ -n "$GROQ_API_KEY" ] && run_groq; then
-            SUCCESS=1
-          elif [ -n "$OPENROUTER_API_KEY" ] && run_openrouter; then
-            SUCCESS=1
+          fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            if [ -n "$GROQ_API_KEY" ]; then
+              if run_groq; then
+                SUCCESS=1
+              fi
+            fi
+          fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            if [ -n "$OPENROUTER_API_KEY" ]; then
+              if run_openrouter; then
+                SUCCESS=1
+              fi
+            fi
           fi
 
           if [ "$SUCCESS" -ne 1 ]; then
@@ -182,9 +202,13 @@ jobs:
               $DIFF_CONTEXT"
               
               if [ -n "$CLAUDE_CODE_USE_GEMINI" ]; then
-                openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+                if ! openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null; then
+                  echo "Fallback gemini commit failed."
+                fi
               else
-                openclaude --provider openai -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+                if ! openclaude --provider openai -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null; then
+                  echo "Fallback openai commit failed."
+                fi
               fi
 
               if [ -s ../commit_msg_fallback.txt ]; then
@@ -214,4 +238,6 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
 
-          curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"
+          if ! curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"; then
+            echo "Final KV update failed."
+          fi
