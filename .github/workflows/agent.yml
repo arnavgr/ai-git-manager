@@ -19,8 +19,6 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    # Bumped from 20 -> 25 to leave room for a fallback attempt or two
-    # (checkout + npm install already eats ~1-2 min of the old budget).
     timeout-minutes: 25
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -30,10 +28,9 @@ jobs:
       # --- Primary provider: Gemini (1M context, best for full-repo edits) ---
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.5-flash
+      GEMINI_MODEL: gemini-3.6-flash
 
-      # --- Fallback #2: OpenRouter (used only if both Gemini models fail) ---
-      # Optional. Leave the repo secret unset to skip this tier entirely.
+      # --- Fallback: OpenRouter (used only if all Gemini models fail) ---
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_MODEL: openrouter/free
 
@@ -57,10 +54,10 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
           git clone "https://github.com/$TARGET_REPO" target
           cd target
-          git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
+          git checkout "$TARGET_BRANCH" \vert{}\vert{} git checkout -b "$TARGET_BRANCH"
 
       - name: Setup Node & Install OpenClaude
-        uses: actions/setup-node@v5 # 🛠️ Upgraded to v5 to fix Node 20 runtime deprecation warning
+        uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -73,53 +70,68 @@ jobs:
           cd target
 
           notify() {
-            # FIX: --data-raw sends the exact string without URL-encoding it
             curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
               -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$1" || true
           }
 
-          # 🚀 Tell the agent to write its own commit message
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
 
-          # ---- Provider attempts, in priority order ----
-          # 1) Gemini 3.5 Flash: 1M context, best quality, tried first.
-          # 2) Gemini 3.1 Flash Lite: Same provider, lighter model fallback.
-          # 3) OpenRouter (free model): only if OPENROUTER_API_KEY secret is set.
-
-          run_gemini() {
-            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.5 Flash)..."
+          run_gemini_3_6_flash() {
+            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.6 Flash)..."
             unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
             export CLAUDE_CODE_USE_GEMINI=1
-            export GEMINI_MODEL="gemini-3.5-flash"
-            timeout 14m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            export GEMINI_MODEL="gemini-3.6-flash"
+            timeout 9m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
-          run_gemini_lite() {
-            notify "⏳ 3/4: Gemini 3.5 failed or hit quota — retrying via Gemini 3.1 Flash Lite..."
+          run_gemini_3_5_flash() {
+            notify "⏳ 3/4: 3.6 Flash failed/hit quota — retrying via Gemini 3.5 Flash..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            export CLAUDE_CODE_USE_GEMINI=1
+            export GEMINI_MODEL="gemini-3.5-flash"
+            timeout 6m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            return $?
+          }
+          
+          run_gemini_3_5_flash_lite() {
+            notify "⏳ 3/4: 3.5 Flash failed/hit quota — retrying via Gemini 3.5 Flash-Lite..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            export CLAUDE_CODE_USE_GEMINI=1
+            export GEMINI_MODEL="gemini-3.5-flash-lite"
+            timeout 4m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            return $?
+          }
+
+          run_gemini_3_1_flash_lite() {
+            notify "⏳ 3/4: 3.5 Flash-Lite failed/hit quota — retrying via Gemini 3.1 Flash Lite..."
             unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
             export CLAUDE_CODE_USE_GEMINI=1
             export GEMINI_MODEL="gemini-3.1-flash-lite"
-            timeout 8m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            timeout 3m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           run_openrouter() {
-            notify "⏳ 3/4: Gemini failed or hit quota — retrying via OpenRouter ($OPENROUTER_MODEL)..."
+            notify "⏳ 3/4: All Gemini tiers failed — retrying via OpenRouter ($OPENROUTER_MODEL)..."
             unset CLAUDE_CODE_USE_GEMINI
             export CLAUDE_CODE_USE_OPENAI=1
             export OPENAI_API_KEY="$OPENROUTER_API_KEY"
             export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
             export OPENAI_MODEL="$OPENROUTER_MODEL"
-            timeout 5m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
+            timeout 2m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           SUCCESS=0
 
-          if run_gemini; then
+          if run_gemini_3_6_flash; then
             SUCCESS=1
-          elif run_gemini_lite; then
+          elif run_gemini_3_5_flash; then
+            SUCCESS=1
+          elif run_gemini_3_5_flash_lite; then
+            SUCCESS=1
+          elif run_gemini_3_1_flash_lite; then
             SUCCESS=1
           elif [ -n "$OPENROUTER_API_KEY" ] && run_openrouter; then
             SUCCESS=1
@@ -137,7 +149,6 @@ jobs:
           git config user.name "OpenClaude Agent"
           git config user.email "agent@arnavgr.com"
 
-          # 📝 FIX: Move the commit message OUT of the repo before staging files
           if [ -f commit_msg.txt ]; then
             mv commit_msg.txt ../commit_msg.txt
           fi
@@ -147,27 +158,21 @@ jobs:
           if git diff-index --quiet HEAD; then
             echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
           else
-            # 🩹 FIX: weaker/cheaper models (common when routing through
-            # OpenRouter) reliably do the coding task but often drop the
-            # secondary "also write commit_msg.txt" instruction entirely.
-            # That silently fell through to `AI Update: $USER_PROMPT` below —
-            # i.e. the raw prompt dumped verbatim as the commit message.
-            # If the agent didn't leave us a message, make one focused,
-            # low-stakes follow-up call whose ONLY job is to summarize the
-            # *actual diff* — not the original task/prompt.
             if [ ! -s ../commit_msg.txt ]; then
               echo "No commit_msg.txt from the agent — generating one from the diff instead."
               DIFF_CONTEXT=$(git diff --cached --stat; echo; git diff --cached | head -c 6000)
               COMMIT_PROMPT="Write a concise, professional git commit message for this diff. Output ONLY the raw commit message text - no markdown, no code fences, no quotes, no commentary.
 
               $DIFF_CONTEXT"
-              # NOTE: this uses the same --provider flag as the step above.
-              # If your OpenRouter runs actually go through a different
-              # workflow/provider config, mirror that here too.
-              openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+              
+              # Execute fallback commit generation using whatever provider succeeded above
+              if [ -n "$CLAUDE_CODE_USE_GEMINI" ]; then
+                openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+              else
+                openclaude --provider openai -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null || true
+              fi
 
               if [ -s ../commit_msg_fallback.txt ]; then
-                # strip stray code fences/quotes some models still add
                 sed -e '/^```/d' -e "s/^['\"]//" -e "s/['\"]\$//" ../commit_msg_fallback.txt > ../commit_msg.txt
               fi
             fi
@@ -176,8 +181,6 @@ jobs:
               echo "Using AI-generated commit message."
               git commit -F ../commit_msg.txt
             else
-              # True last resort: summarize which files changed. This never
-              # falls back to the raw user prompt again.
               CHANGED=$(git diff --cached --name-only | tr '\n' ' ')
               echo "No AI commit message available — falling back to a file list."
               git commit -m "AI Update: modified ${CHANGED}"
@@ -186,6 +189,7 @@ jobs:
             git push origin "$TARGET_BRANCH"
             echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
           fi
+          
       - name: Final KV Status Update
         if: always()
         run: |
@@ -195,5 +199,4 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
 
-          # FIX: --data-raw prevents payload corruption without URL-encoding it
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"
+          curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"
