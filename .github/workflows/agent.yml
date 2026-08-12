@@ -210,13 +210,29 @@ jobs:
           
       - name: Final KV Status Update
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
-          if [ "${{ job.status }}" == "success" ]; then
+          if [ "$JOB_STATUS" == "success" ]; then
             STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
           else
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
 
-          if ! curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "$STATUS_MSG"; then
-            echo "Final KV update failed."
+          URL="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/agent_status"
+
+          HTTP_CODE=$(curl -s -o /tmp/kv_resp.txt -w "%{http_code}" \
+            -X PUT "$URL" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: text/plain; charset=utf-8" \
+            --data-binary "$STATUS_MSG")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Final KV update failed. HTTP $HTTP_CODE"
+            echo "Response body:"
+            cat /tmp/kv_resp.txt
+            echo
+            exit 0   # don't fail the whole workflow over a status update
+          else
+            echo "Final KV update OK (HTTP $HTTP_CODE): $STATUS_MSG"
           fi
