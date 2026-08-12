@@ -2,142 +2,108 @@ export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  // FIX 1: Simple HTML escaper — prevents XSS from repo/branch query params
+  // Simple HTML escaper
   const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
   // =========================================================================
-  //  /status — internal KV read
-  //  FIX 2: Added a simple secret-token check so anyone can't poll your KV
+  // POST /send — User sends a new message from the dumbphone
   // =========================================================================
-  if (url.pathname === "/status") {
-    if (url.searchParams.get("token") !== env.AUTH_PIN) {
-      return new Response("Forbidden", { status: 403 });
-    }
-    const val = await env.AGENT_KV.get("agent_status");
-    return new Response(val || "⏳ Waiting for agent...", {
-      headers: { "content-type": "text/plain" }
-    });
-  }
-
-  // =========================================================================
-  //  /dispatched — GET only, PRG target
-  // =========================================================================
-  if (url.pathname === "/dispatched" && request.method === "GET") {
-    // FIX 3: Escape repo and branch before injecting into HTML (XSS)
-    const repo   = esc(url.searchParams.get("repo")   || "arnavgr/");
-    const branch = esc(url.searchParams.get("branch") || "main");
-
-    const currentStatus = await env.AGENT_KV.get("agent_status") || "⏳ Waiting for GitHub Actions...";
-    const isDone = currentStatus.includes('✅') || currentStatus.includes('❌');
-    const refreshMeta = isDone ? "" : '<meta http-equiv="refresh" content="5">';
-
-    return new Response(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        ${refreshMeta}
-        <title>Agent Status</title>
-      </head>
-      <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
-        <h3>⚡ Task Dispatched</h3>
-        <p>Repo: ${repo}<br>Branch: ${branch}</p>
-        <hr style="border-color:#333;">
-        <p style="color:#aaa;">Live Status:</p>
-        <div style="padding:10px;background:#111;border:1px solid #333;">
-          ${esc(currentStatus)}
-        </div>
-        <br>
-        <a href="/" style="color:#0f0;text-decoration:none;">[ ← New Task ]</a>
-        ${!isDone ? '<br><br><a href="" style="color:#aaa;">[ Force Refresh ]</a>' : ''}
-      </body>
-      </html>
-    `, { headers: { "content-type": "text/html" } });
-  }
-
-  // =========================================================================
-  //  POST / — dispatch the agent
-  // =========================================================================
-  if (request.method === "POST") {
+  if (url.pathname === "/send" && request.method === "POST") {
     const data = await request.formData();
     const pin = data.get("pin") || "";
+    
+    if (pin !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
 
-    // FIX 4: timing-safe HMAC comparison (crypto.subtle, Works runtime compatible)
-    let valid = false;
-    try {
-      const enc = new TextEncoder();
-      const key = await crypto.subtle.importKey(
-        "raw", enc.encode(env.AUTH_PIN || ""),
-        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
-      );
-      const [sigA, sigB] = await Promise.all([
-        crypto.subtle.sign("HMAC", key, enc.encode(pin)),
-        crypto.subtle.sign("HMAC", key, enc.encode(env.AUTH_PIN || ""))
-      ]);
-      const a = new Uint8Array(sigA), b = new Uint8Array(sigB);
-      valid = a.length === b.length && a.every((byte, i) => byte === b[i]);
-    } catch {
-      valid = false;
-    }
-
-    if (!valid) return new Response("❌ Bad PIN.", { status: 401 });
-
-    const prompt = data.get("prompt");
-    const repo   = data.get("repo");
-    const branch = data.get("branch") || "main";
-
-    await env.AGENT_KV.put("agent_status", "⏳ 1/4: Action Triggered...");
-
-    // NEW: Determine which branch of the MANAGER repo to run
-    // Falls back to "main" if the env var isn't set.
-    const managerBranch = env.MANAGER_BRANCH || "main"; 
-
-    const res = await fetch(
-      `https://api.github.com/repos/${env.GH_USER}/${env.MANAGER_REPO}/actions/workflows/agent.yml/dispatches`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${env.GH_PAT}`,
-          "Accept": "application/vnd.github.v3+json",
-          "User-Agent": "CF-Worker-Agent"
-        },
-        body: JSON.stringify({
-          ref: managerBranch, // Targets the specific branch (main or testing)
-          inputs: { prompt, repo, branch }
-        })
-      }
-    );
-
-    if (!res.ok) {
-      await env.AGENT_KV.put("agent_status", `❌ Dispatch failed.`);
-      return new Response(`❌ GitHub dispatch failed`, { status: 500 });
-    }
-
-    const params = new URLSearchParams({ repo, branch });
-    return Response.redirect(`${url.origin}/dispatched?${params}`, 303);
+    const msg = String(data.get("msg") || "");
+    const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { msg_id: 0, history: "" };
+    
+    const newState = {
+      status: "thinking",
+      last_user: msg,
+      last_agent: state.last_agent || "",
+      msg_id: (state.msg_id || 0) + 1,
+      history: state.history || ""
+    };
+    
+    await env.AGENT_KV.put("chat_state", JSON.stringify(newState));
+    return Response.redirect(`${url.origin}/chat?token=${encodeURIComponent(pin)}`, 303);
   }
 
   // =========================================================================
-  //  GET / — Main Form
+  // GET /chat — The live chat interface
   // =========================================================================
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>CloudPhone Agent</title>
-    </head>
-    <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
-      <h2>Gemini Agent</h2>
-      <form method="POST">
-        <input type="password" name="pin" placeholder="PIN" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;" required>
-        <input type="text" name="repo" value="arnavgr/" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;" required>
-        <input type="text" name="branch" value="main" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;">
-        <textarea name="prompt" rows="5" placeholder="Feature to add/remove..." style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;" required></textarea>
-        <input type="submit" value="[ EXECUTE ]" style="width:100%;padding:15px;background:#0f0;color:#000;border:none;font-weight:bold;font-size:16px;">
-      </form>
-    </body>
-    </html>
-  `, { headers: { "content-type": "text/html" } });
+  if (url.pathname === "/chat" && request.method === "GET") {
+    const token = url.searchParams.get("token") || "";
+    if (token !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
+
+    const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { status: "waiting", last_agent: "Waiting for agent to boot..." };
+    
+    const isThinking = state.status === "thinking" || state.status === "booting";
+    const refreshRate = isThinking ? 3 : 10; // Poll faster while thinking
+    const statusColor = isThinking ? "#ff0" : "#0f0";
+
+    return new Response(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="${refreshRate}">
+  <title>Live Chat</title>
+</head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
+  <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:10px;">
+    STATUS: ${esc(state.status.toUpperCase())}
+  </div>
+  
+  <pre style="white-space:pre-wrap;word-break:break-all;background:#111;padding:10px;border:1px solid #333;font-size:14px;">${esc(state.last_agent || "No output yet.")}</pre>
+
+  <br>
+  <form method="POST" action="/send?token=${esc(token)}">
+    <input type="hidden" name="pin" value="${esc(token)}">
+    <textarea name="msg" rows="3" placeholder="Next instruction..." style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;font-size:16px;" required></textarea>
+    <button type="submit" style="width:100%;padding:15px;background:#0f0;color:#000;border:none;font-weight:bold;font-size:16px;margin-top:5px;">SEND</button>
+  </form>
+  <br>
+  <div style="font-size:12px;color:#555;">
+    Type <b>/push</b> to commit & push.<br>
+    Type <b>/exit</b> to terminate the runner.
+  </div>
+</body>
+</html>`, { headers: { "content-type": "text/html" } });
+  }
+
+  // =========================================================================
+  // POST / — Dispatch the GitHub Action
+  // =========================================================================
+  if (request.method === "POST" && url.pathname === "/") {
+    const data = await request.formData();
+    const pin = data.get("pin") || "";
+    if (pin !== env.AUTH_PIN) return new Response("❌ Bad PIN.", { status: 401 });
+
+    const prompt = String(data.get("prompt") || "");
+    const repo = String(data.get("repo") || "");
+    const branch = String(data.get("branch") || "main");
+
+    // Reset chat state
+    await env.AGENT_KV.put("chat_state", JSON.stringify({
+      status: "booting",
+      last_user: prompt,
+      last_agent: "Booting GitHub Action runner...",
+      msg_id: 1,
+      history: ""
+    }));
+
+    // Trigger GH Action (same as your original code)
+    const ghHeaders = { "Authorization": `Bearer ${env.GH_PAT}`, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "CF-Worker-Agent" };
+    await fetch(`https://api.github.com/repos/${env.GH_USER}/${env.MANAGER_REPO}/actions/workflows/agent.yml/dispatches`, {
+      method: "POST",
+      headers: ghHeaders,
+      body: JSON.stringify({ ref: env.MANAGER_BRANCH || "main", inputs: { prompt, repo, branch } })
+    });
+
+    return Response.redirect(`${url.origin}/chat?token=${encodeURIComponent(pin)}`, 303);
+  }
+
+  // GET / — Main landing page (same as your original)
+  return new Response(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="background:#000;color:#0f0;font-family:monospace;padding:10px;"><h2>Dispatch Agent</h2><form method="POST"><input type="password" name="pin" placeholder="PIN" style="width:100%;background:#222;color:#fff;padding:10px;margin-bottom:10px;" required><input type="text" name="repo" value="arnavgr/" style="width:100%;background:#222;color:#fff;padding:10px;margin-bottom:10px;" required><input type="text" name="branch" value="main" style="width:100%;background:#222;color:#fff;padding:10px;margin-bottom:10px;"><textarea name="prompt" rows="3" placeholder="First prompt..." style="width:100%;background:#222;color:#fff;padding:10px;margin-bottom:10px;" required></textarea><button type="submit" style="width:100%;padding:15px;background:#0f0;color:#000;border:none;font-weight:bold;">START</button></form></body></html>`, { headers: { "content-type": "text/html" } });
 }

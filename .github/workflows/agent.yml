@@ -1,4 +1,4 @@
-name: OpenClaude Coding Agent
+name: OpenClaude Live Chat Agent
 on:
   workflow_dispatch:
     inputs:
@@ -19,106 +19,116 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    timeout-minutes: 20       
+    timeout-minutes: 90
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-      
-      CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.1-flash-lite
-      
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
-      TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
+      TARGET_BRANCH: ${{ github.event.inputs.branch }}
+      GH_PAT: ${{ secrets.GH_PAT }}
 
     steps:
-      - name: Notify KV - Booting Agent
-        run: |
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 2/4: Initializing OpenClaude agent..."
-
       - name: Checkout Target Repo
         run: |
-          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/$TARGET_REPO" target
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+          git clone "https://github.com/$TARGET_REPO" target
           cd target
-          git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
+          if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then git checkout -b "$TARGET_BRANCH"; fi
 
       - name: Setup Node & Install OpenClaude
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 22 # 🛠️ Upgraded to Node 22 to fix Firecrawl EBADENGINE warnings
-          
-      - name: Install & Patch OpenClaude
-        run: |
-          npm install -g @gitlawb/openclaude
-          
-          # 🛠️ The "Track and Patch" Method
-          # Find the exact executable path, trace back to the actual library folder,
-          # and inject the 1M token limit for 3.1-flash-lite wherever 1.5-flash exists.
-          
-          echo "Hunting for OpenClaude real installation path..."
-          BIN_PATH=$(which openclaude)
-          REAL_BIN=$(readlink -f "$BIN_PATH")
-          PACKAGE_DIR=$(dirname $(dirname "$REAL_BIN"))
-          
-          echo "Package firmly located at: $PACKAGE_DIR"
-          
-          find "$PACKAGE_DIR" -type f -name "*.js" -exec grep -l "gemini-1.5-flash" {} \; | while read -r MODEL_FILE; do
-            echo "Patching model metadata in: $MODEL_FILE"
-            sed -i "s|gemini-1.5-flash|gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', 1048576, 8192), googleModel('gemini-1.5-flash|g" "$MODEL_FILE"
-          done 
+          node-version: 22
 
-      - name: Execute Agentic Changes
-        run: |
-          cd target
+      - name: Install OpenClaude
+        run: npm install -g @gitlawb/openclaude
 
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" \
-          -H "Authorization: Bearer $CF_API_TOKEN" \
-          -d "⏳ 3/4: OpenClaude is actively refactoring codebase..."
-
-          # 🚀 Tell the agent to write its own commit message
-          INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
-          
-          openclaude -p "$INSTRUCTION" --dangerously-skip-permissions
-
-      - name: Commit and Push
+      - name: Run Live Chat Bridge
         working-directory: ./target
         run: |
-          git config user.name "OpenClaude Agent"
-          git config user.email "agent@arnavgr.com"
+          node << 'EOF'
+          const { execSync } = require('child_process');
+          const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+          const CF_API_TOKEN = process.env.CF_API_TOKEN;
+          const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
+          const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
+          const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
 
-          # 📝 FIX: Move the commit message OUT of the repo before staging files
-          if [ -f commit_msg.txt ]; then
-            mv commit_msg.txt ../commit_msg.txt
-          fi
+          async function getState() {
+            const res = await fetch(KV_URL, { headers: HEADERS });
+            if (!res.ok) return { msg_id: 0, status: "error" };
+            return await res.json();
+          }
 
-          git add .
+          async function setState(data) {
+            await fetch(KV_URL, { method: 'PUT', headers: HEADERS, body: JSON.stringify(data) });
+          }
 
-          if git diff-index --quiet HEAD; then
-            echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
-          else
-            # 📝 Reference the moved file for the commit
-            if [ -f ../commit_msg.txt ]; then
-              echo "Using AI-generated commit message."
-              git commit -F ../commit_msg.txt
-            else
-              echo "Fallback commit message."
-              git commit -m "AI Update: $USER_PROMPT"
-            fi
-            
-            git push origin "$TARGET_BRANCH"
-            echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
-          fi 
-      - name: Final KV Status Update
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
-          else
-            STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
-          fi
-          
-          curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -d "$STATUS_MSG"
+          async function loop() {
+            let lastMsgId = 0;
+            // Send the initial prompt that triggered the workflow
+            let currentState = await getState();
+            lastMsgId = currentState.msg_id;
+
+            while(true) {
+              try {
+                const state = await getState();
+                
+                if (state.msg_id > lastMsgId) {
+                  lastMsgId = state.msg_id;
+                  const userMsg = state.last_user.trim();
+                  
+                  await setState({ ...state, status: "thinking" });
+
+                  // Handle special commands
+                  if (userMsg === '/exit') {
+                    await setState({ ...state, status: "exited", last_agent: "Runner terminated by user." });
+                    process.exit(0);
+                  } 
+                  else if (userMsg === '/push') {
+                    try {
+                      execSync('git add .', { stdio: 'inherit' });
+                      execSync('git commit -m "Live chat update"', { stdio: 'inherit' });
+                      execSync('git push origin HEAD', { stdio: 'inherit' });
+                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes pushed successfully!" });
+                    } catch (e) {
+                      await setState({ ...state, status: "waiting", last_agent: "❌ Push failed: " + e.message });
+                    }
+                    continue;
+                  }
+
+                  // Run OpenClaude with --continue to maintain chat context
+                  // Note: Adjust the provider flags as needed for your setup
+                  let agentResponse = "";
+                  try {
+                    // We use execSync because it's synchronous and easy to capture
+                    // The --continue flag tells the CLI to remember the previous turn
+                    agentResponse = execSync(
+                      `openclaude --provider gemini -p "${userMsg.replace(/"/g, '\\"')}" --continue --dangerously-skip-permissions`,
+                      { encoding: 'utf8', timeout: 600000 } // 10 min timeout per prompt
+                    );
+                  } catch (err) {
+                    agentResponse = "Error executing agent: " + err.stdout || err.message;
+                  }
+
+                  await setState({ 
+                    status: "waiting", 
+                    last_user: userMsg, 
+                    last_agent: agentResponse || "(No response from agent)",
+                    msg_id: lastMsgId 
+                  });
+                }
+              } catch (err) {
+                console.error("Bridge error:", err);
+              }
+              
+              // Poll every 3 seconds
+              await new Promise(r => setTimeout(r, 3000));
+            }
+          }
+
+          loop();
+          EOF
