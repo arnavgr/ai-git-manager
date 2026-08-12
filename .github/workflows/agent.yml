@@ -19,26 +19,22 @@ on:
 jobs:
   execute:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
 
-      # --- Primary provider: Gemini (1M context, best for full-repo edits) ---
       CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.6-flash
+      GEMINI_MODEL: gemini-3.5-flash
 
-      # --- Fallback 1: Groq (Blazing fast inference, 8k TPM free tier) ---
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GROQ_MODEL: qwen/qwen3.6-27b
 
-      # --- Fallback 2: OpenRouter (Last resort) ---
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_MODEL: openrouter/free
 
-      # --- Web search backend for the agent itself (optional but recommended) ---
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
 
       USER_PROMPT: ${{ github.event.inputs.prompt }}
@@ -48,7 +44,7 @@ jobs:
     steps:
       - name: Notify KV - Booting Agent
         run: |
-          if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "⏳ 2/4: Initializing OpenClaude agent..."; then
+          if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "⏳ 2/4: Initializing OpenClaude agent..."; then
             echo "KV init failed, continuing..."
           fi
 
@@ -57,11 +53,11 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
           git clone "https://github.com/$TARGET_REPO" target
           cd target
-          
+
           if [ -z "$TARGET_BRANCH" ]; then
             export TARGET_BRANCH="main"
           fi
-          
+
           if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then
             git checkout -b "$TARGET_BRANCH"
           fi
@@ -80,81 +76,64 @@ jobs:
           cd target
 
           notify() {
-            if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$1"; then
+            if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "$1"; then
               echo "KV update failed, continuing..."
             fi
           }
 
           INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
 
-          run_gemini_3_6_flash() {
-            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.6 Flash)..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
-            export CLAUDE_CODE_USE_GEMINI=1
-            export GEMINI_MODEL="gemini-3.6-flash"
-            timeout 8m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-
           run_gemini_3_5_flash() {
-            notify "⏳ 3/4: 3.6 Flash failed/hit quota — retrying via Gemini 3.5 Flash..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.5 Flash)..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI CLAUDE_CODE_MAX_OUTPUT_TOKENS
             export CLAUDE_CODE_USE_GEMINI=1
             export GEMINI_MODEL="gemini-3.5-flash"
-            timeout 5m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-          
-          run_gemini_3_5_flash_lite() {
-            notify "⏳ 3/4: 3.5 Flash failed/hit quota — retrying via Gemini 3.5 Flash-Lite..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
-            export CLAUDE_CODE_USE_GEMINI=1
-            export GEMINI_MODEL="gemini-3.5-flash-lite"
-            timeout 3m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            timeout 20m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           run_gemini_3_1_flash_lite() {
-            notify "⏳ 3/4: 3.5 Flash-Lite failed/hit quota — retrying via Gemini 3.1 Flash Lite..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI
+            notify "⏳ 3/4: Gemini 3.5 Flash failed/hit quota — retrying via Gemini 3.1 Flash Lite..."
+            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI CLAUDE_CODE_MAX_OUTPUT_TOKENS
             export CLAUDE_CODE_USE_GEMINI=1
             export GEMINI_MODEL="gemini-3.1-flash-lite"
-            timeout 3m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
+            timeout 20m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           run_groq() {
-            notify "⏳ 3/4: All Gemini tiers failed — retrying via Groq ($GROQ_MODEL)..."
+            notify "⏳ 3/4: Gemini tiers failed/hit quota — retrying via Groq ($GROQ_MODEL)..."
             unset CLAUDE_CODE_USE_GEMINI
             export CLAUDE_CODE_USE_OPENAI=1
             export OPENAI_API_KEY="$GROQ_API_KEY"
             export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
             export OPENAI_MODEL="$GROQ_MODEL"
-            timeout 2m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
+            export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384
+            timeout 20m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           run_openrouter() {
             notify "⏳ 3/4: Groq failed/hit quota — retrying via OpenRouter ($OPENROUTER_MODEL)..."
-            unset CLAUDE_CODE_USE_GEMINI
+            unset CLAUDE_CODE_USE_GEMINI CLAUDE_CODE_MAX_OUTPUT_TOKENS
             export CLAUDE_CODE_USE_OPENAI=1
             export OPENAI_API_KEY="$OPENROUTER_API_KEY"
             export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
             export OPENAI_MODEL="$OPENROUTER_MODEL"
-            timeout 2m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
+            timeout 20m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
             return $?
           }
 
           SUCCESS=0
 
-          if run_gemini_3_6_flash; then
+          if run_gemini_3_5_flash; then
             SUCCESS=1
-          elif run_gemini_3_5_flash; then
-            SUCCESS=1
-          elif run_gemini_3_5_flash_lite; then
-            SUCCESS=1
-          elif run_gemini_3_1_flash_lite; then
-            SUCCESS=1
+          fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            if run_gemini_3_1_flash_lite; then
+              SUCCESS=1
+            fi
           fi
 
           if [ "$SUCCESS" -eq 0 ]; then
@@ -238,6 +217,6 @@ jobs:
             STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
           fi
 
-          if ! curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" --data-raw "$STATUS_MSG"; then
+          if ! curl -g -s -o /dev/null -X PUT "[https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status](https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status)" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "$STATUS_MSG"; then
             echo "Final KV update failed."
           fi
