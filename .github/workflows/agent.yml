@@ -1,4 +1,5 @@
 name: OpenClaude Live Chat Agent
+
 on:
   workflow_dispatch:
     inputs:
@@ -25,6 +26,11 @@ jobs:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_MODEL: "qwen/qwen3.6-27b"
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: "openrouter/free"
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
       TARGET_BRANCH: ${{ github.event.inputs.branch }}
@@ -36,7 +42,9 @@ jobs:
           git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
           git clone "https://github.com/$TARGET_REPO" target
           cd target
-          if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then git checkout -b "$TARGET_BRANCH"; fi
+          if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then
+            git checkout -b "$TARGET_BRANCH"
+          fi
 
       - name: Setup Node & Install OpenClaude
         uses: actions/setup-node@v5
@@ -50,85 +58,202 @@ jobs:
         working-directory: ./target
         run: |
           node << 'EOF'
-          const { execSync } = require('child_process');
+          const { spawnSync } = require('child_process');
           const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
           const CF_API_TOKEN = process.env.CF_API_TOKEN;
           const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
           const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
-          const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
+          const HEADERS = { 
+            "Authorization": `Bearer ${CF_API_TOKEN}`, 
+            "Content-Type": "application/json" 
+          };
 
           async function getState() {
-            const res = await fetch(KV_URL, { headers: HEADERS });
-            if (!res.ok) return { msg_id: 0, status: "error" };
-            return await res.json();
+            try {
+              const res = await fetch(KV_URL, { headers: HEADERS });
+              if (!res.ok) return null;
+              return await res.json();
+            } catch (e) {
+              return null;
+            }
           }
 
           async function setState(data) {
-            await fetch(KV_URL, { method: 'PUT', headers: HEADERS, body: JSON.stringify(data) });
+            try {
+              await fetch(KV_URL, { 
+                method: 'PUT', 
+                headers: HEADERS, 
+                body: JSON.stringify(data) 
+              });
+            } catch (e) {
+              console.error("Failed to update KV state:", e);
+            }
+          }
+
+          function runAgent(provider, sessionId, userMsg) {
+            let env = { ...process.env };
+            const args = [];
+
+            // Configure provider specific settings
+            if (provider === 'gemini') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.5-flash";
+            } else if (provider === 'gemini-lite') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+            } else if (provider === 'groq') {
+              args.push('--provider', 'openai');
+              delete env.CLAUDE_CODE_USE_GEMINI;
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = env.GROQ_API_KEY;
+              env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
+              env.OPENAI_MODEL = env.GROQ_MODEL;
+              env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
+            } else if (provider === 'openrouter') {
+              args.push('--provider', 'openai');
+              delete env.CLAUDE_CODE_USE_GEMINI;
+              delete env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
+              env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
+              env.OPENAI_MODEL = env.OPENROUTER_MODEL;
+            }
+
+            if (sessionId) {
+              args.push('--resume', sessionId);
+            }
+            
+            args.push('-p', userMsg, '--dangerously-skip-permissions');
+
+            const result = spawnSync('openclaude', args, { 
+              encoding: 'utf8', 
+              timeout: 900000, // 15 min per command
+              env: env 
+            });
+            
+            const combinedOutput = (result.stdout || "") + "\n" + (result.stderr || "");
+            const match = combinedOutput.match(/--resume\s+([a-zA-Z0-9_-]+)/);
+            const newSessionId = match ? match[1] : sessionId;
+            
+            const isError = combinedOutput.toLowerCase().includes("error: 429") || 
+                            combinedOutput.toLowerCase().includes("quota exceeded") ||
+                            combinedOutput.toLowerCase().includes("rate limit") ||
+                            result.status !== 0;
+
+            return { 
+              success: !isError && result.status === 0, 
+              output: combinedOutput.trim() || "(No output from agent)", 
+              sessionId: newSessionId, 
+              provider: provider 
+            };
           }
 
           async function loop() {
             let lastMsgId = 0;
-            // Send the initial prompt that triggered the workflow
-            let currentState = await getState();
-            lastMsgId = currentState.msg_id;
+            let lastActivityTime = Date.now();
+            const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 mins idle auto-shutdown
 
             while(true) {
               try {
                 const state = await getState();
                 
-                if (state.msg_id > lastMsgId) {
-                  lastMsgId = state.msg_id;
-                  const userMsg = state.last_user.trim();
+                if (state && Number(state.msg_id) > lastMsgId) {
+                  lastMsgId = Number(state.msg_id);
+                  lastActivityTime = Date.now();
+                  const userMsg = String(state.last_user || "").trim();
                   
                   await setState({ ...state, status: "thinking" });
 
-                  // Handle special commands
                   if (userMsg === '/exit') {
                     await setState({ ...state, status: "exited", last_agent: "Runner terminated by user." });
                     process.exit(0);
                   } 
                   else if (userMsg === '/push') {
                     try {
-                      execSync('git add .', { stdio: 'inherit' });
-                      execSync('git commit -m "Live chat update"', { stdio: 'inherit' });
-                      execSync('git push origin HEAD', { stdio: 'inherit' });
-                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes pushed successfully!" });
+                      spawnSync('git', ['config', 'user.name', 'OpenClaude Agent'], { stdio: 'inherit' });
+                      spawnSync('git', ['config', 'user.email', 'agent@arnavgr.com'], { stdio: 'inherit' });
+                      spawnSync('git', ['add', '.'], { stdio: 'inherit' });
+                      spawnSync('git', ['commit', '-m', 'Live chat agent update'], { stdio: 'inherit' });
+                      spawnSync('git', ['push', 'origin', 'HEAD'], { stdio: 'inherit' });
+                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes successfully committed and pushed to git." });
                     } catch (e) {
                       await setState({ ...state, status: "waiting", last_agent: "❌ Push failed: " + e.message });
                     }
                     continue;
                   }
 
-                  // Run OpenClaude with --continue to maintain chat context
-                  // Note: Adjust the provider flags as needed for your setup
-                  let agentResponse = "";
-                  try {
-                    // We use execSync because it's synchronous and easy to capture
-                    // The --continue flag tells the CLI to remember the previous turn
-                    agentResponse = execSync(
-                      `openclaude --provider gemini -p "${userMsg.replace(/"/g, '\\"')}" --continue --dangerously-skip-permissions`,
-                      { encoding: 'utf8', timeout: 600000 } // 10 min timeout per prompt
-                    );
-                  } catch (err) {
-                    agentResponse = "Error executing agent: " + err.stdout || err.message;
+                  const providers = ['gemini', 'gemini-lite', 'groq', 'openrouter'];
+                  let currentProvider = state.provider || providers[0];
+                  let result = runAgent(currentProvider, state.session_id, userMsg);
+
+                  // Fallback loop if primary provider fails
+                  if (!result.success) {
+                    for (const p of providers) {
+                      if (p === currentProvider) continue;
+                      result = runAgent(p, state.session_id, userMsg);
+                      if (result.success) break;
+                    }
+                  }
+
+                  if (!result.success) {
+                    result.output = "❌ All configured providers failed or hit quotas.\n\n" + result.output;
                   }
 
                   await setState({ 
                     status: "waiting", 
                     last_user: userMsg, 
-                    last_agent: agentResponse || "(No response from agent)",
-                    msg_id: lastMsgId 
+                    last_agent: result.output,
+                    msg_id: lastMsgId,
+                    session_id: result.sessionId,
+                    provider: result.success ? result.provider : state.provider
                   });
                 }
+
+                // Inactivity check
+                if (Date.now() - lastActivityTime > IDLE_TIMEOUT_MS) {
+                  await setState({ 
+                    ...(state || {}), 
+                    status: "exited", 
+                    last_agent: "⏱️ Runner terminated automatically due to 15 minutes of inactivity." 
+                  });
+                  process.exit(0);
+                }
+
               } catch (err) {
-                console.error("Bridge error:", err);
+                console.error("Bridge runtime error:", err);
               }
               
-              // Poll every 3 seconds
               await new Promise(r => setTimeout(r, 3000));
             }
           }
 
           loop();
+          EOF
+
+      - name: Final KV Status Update
+        if: always()
+        run: |
+          node << 'EOF'
+          const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+          const CF_API_TOKEN = process.env.CF_API_TOKEN;
+          const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
+          const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
+          const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
+
+          async function finalize() {
+            try {
+              const res = await fetch(KV_URL, { headers: HEADERS });
+              let state = res.ok ? await res.json() : {};
+              state.status = "exited";
+              if (!state.last_agent || !state.last_agent.includes("terminated")) {
+                state.last_agent = "Session ended.\n\n" + (state.last_agent || "");
+              }
+              await fetch(KV_URL, { method: 'PUT', headers: HEADERS, body: JSON.stringify(state) });
+            } catch (e) {
+              console.error("Finalization failed:", e);
+            }
+          }
+          finalize();
           EOF
