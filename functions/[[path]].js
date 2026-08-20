@@ -27,8 +27,8 @@ export async function onRequest(context) {
     return Response.redirect(`${url.origin}/chat?token=${encodeURIComponent(pin)}`, 303);
   }
 
-  // =========================================================================
-  // GET /chat — Live chat interface
+   // =========================================================================
+  // GET /chat — The live chat interface
   // =========================================================================
   if (url.pathname === "/chat" && request.method === "GET") {
     const token = url.searchParams.get("token") || "";
@@ -37,7 +37,10 @@ export async function onRequest(context) {
     const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { status: "waiting", last_agent: "Waiting for agent to boot..." };
     
     const isThinking = state.status === "thinking" || state.status === "booting";
-    const refreshRate = isThinking ? 3 : 10;
+    
+    // Auto-refresh ONLY while the agent is generating output.
+    // When waiting for user input, disable auto-refresh completely so text is never wiped.
+    const refreshMeta = isThinking ? '<meta http-equiv="refresh" content="3">' : '';
     const statusColor = isThinking ? "#ff0" : (state.status === "exited" ? "#f00" : "#0f0");
 
     return new Response(`<!DOCTYPE html>
@@ -45,7 +48,7 @@ export async function onRequest(context) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  ${state.status !== "exited" ? `<meta http-equiv="refresh" content="${refreshRate}">` : ""}
+  ${refreshMeta}
   <title>Live Chat</title>
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
@@ -64,7 +67,8 @@ export async function onRequest(context) {
   </form>
   <br>
   <div style="font-size:11px;color:#777;">
-    Commands: <b>/push</b> (commit & push), <b>/exit</b> (terminate runner)
+    Commands: <b>/push</b> (commit & push), <b>/exit</b> (terminate runner)<br>
+    <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a>
   </div>` : `<div style="color:#f55;">Runner terminated. Return to <a href="/" style="color:#0f0;">main page</a> to start a new task.</div>`}
 </body>
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
