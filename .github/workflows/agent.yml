@@ -1,4 +1,5 @@
-name: OpenClaude Coding Agent
+name: OpenClaude Live Chat Agent
+
 on:
   workflow_dispatch:
     inputs:
@@ -24,40 +25,23 @@ jobs:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-
-      CLAUDE_CODE_USE_GEMINI: 1
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.5-flash
-
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      GROQ_MODEL: qwen/qwen3.6-27b
-
+      GROQ_MODEL: "qwen/qwen3.6-27b"
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENROUTER_MODEL: openrouter/free
-
+      OPENROUTER_MODEL: "openrouter/free"
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
       TARGET_BRANCH: ${{ github.event.inputs.branch }}
+      GH_PAT: ${{ secrets.GH_PAT }}
 
     steps:
-      - name: Notify KV - Booting Agent
-        run: |
-          if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "⏳ 2/4: Initializing OpenClaude agent..."; then
-            echo "KV init failed, continuing..."
-          fi
-
       - name: Checkout Target Repo
         run: |
-          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
           git clone "https://github.com/$TARGET_REPO" target
           cd target
-
-          if [ -z "$TARGET_BRANCH" ]; then
-            export TARGET_BRANCH="main"
-          fi
-
           if ! git checkout "$TARGET_BRANCH" 2>/dev/null; then
             git checkout -b "$TARGET_BRANCH"
           fi
@@ -68,171 +52,208 @@ jobs:
           node-version: 22
 
       - name: Install OpenClaude
-        run: |
-          npm install -g @gitlawb/openclaude
+        run: npm install -g @gitlawb/openclaude
 
-      - name: Execute Agentic Changes
-        run: |
-          cd target
-
-          notify() {
-            if ! curl -g -s -o /dev/null -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$KV_NAMESPACE_ID/values/agent_status" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: text/plain; charset=utf-8" --data-binary "$1"; then
-              echo "KV update failed, continuing..."
-            fi
-          }
-
-          INSTRUCTION="$USER_PROMPT. After you complete the task, write a concise, professional git commit message summarizing the exact code changes you made. Save this text to a file named 'commit_msg.txt' in the root directory. Do not include markdown formatting in the file."
-
-          run_gemini_3_5_flash() {
-            notify "⏳ 3/4: OpenClaude is actively refactoring codebase (Gemini 3.5 Flash)..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI CLAUDE_CODE_MAX_OUTPUT_TOKENS
-            export CLAUDE_CODE_USE_GEMINI=1
-            export GEMINI_MODEL="gemini-3.5-flash"
-            timeout 20m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-
-          run_gemini_3_1_flash_lite() {
-            notify "⏳ 3/4: Gemini 3.5 Flash failed/hit quota — retrying via Gemini 3.1 Flash Lite..."
-            unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL CLAUDE_CODE_USE_OPENAI CLAUDE_CODE_MAX_OUTPUT_TOKENS
-            export CLAUDE_CODE_USE_GEMINI=1
-            export GEMINI_MODEL="gemini-3.1-flash-lite"
-            timeout 20m openclaude --provider gemini -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-
-          run_groq() {
-            notify "⏳ 3/4: Gemini tiers failed/hit quota — retrying via Groq ($GROQ_MODEL)..."
-            unset CLAUDE_CODE_USE_GEMINI
-            export CLAUDE_CODE_USE_OPENAI=1
-            export OPENAI_API_KEY="$GROQ_API_KEY"
-            export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
-            export OPENAI_MODEL="$GROQ_MODEL"
-            export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384
-            timeout 20m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-
-          run_openrouter() {
-            notify "⏳ 3/4: Groq failed/hit quota — retrying via OpenRouter ($OPENROUTER_MODEL)..."
-            unset CLAUDE_CODE_USE_GEMINI CLAUDE_CODE_MAX_OUTPUT_TOKENS
-            export CLAUDE_CODE_USE_OPENAI=1
-            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-            export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-            export OPENAI_MODEL="$OPENROUTER_MODEL"
-            timeout 20m openclaude --provider openai -p "$INSTRUCTION" --dangerously-skip-permissions
-            return $?
-          }
-
-          SUCCESS=0
-
-          if run_gemini_3_5_flash; then
-            SUCCESS=1
-          fi
-
-          if [ "$SUCCESS" -eq 0 ]; then
-            if run_gemini_3_1_flash_lite; then
-              SUCCESS=1
-            fi
-          fi
-
-          if [ "$SUCCESS" -eq 0 ]; then
-            if [ -n "$GROQ_API_KEY" ]; then
-              if run_groq; then
-                SUCCESS=1
-              fi
-            fi
-          fi
-
-          if [ "$SUCCESS" -eq 0 ]; then
-            if [ -n "$OPENROUTER_API_KEY" ]; then
-              if run_openrouter; then
-                SUCCESS=1
-              fi
-            fi
-          fi
-
-          if [ "$SUCCESS" -ne 1 ]; then
-            notify "❌ All configured providers failed or hit quota limits."
-            echo "All agent providers failed." >&2
-            exit 1
-          fi
-
-      - name: Commit and Push
+      - name: Run Live Chat Bridge
         working-directory: ./target
         run: |
-          git config user.name "OpenClaude Agent"
-          git config user.email "agent@arnavgr.com"
+          node << 'EOF'
+          const { spawnSync } = require('child_process');
+          const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+          const CF_API_TOKEN = process.env.CF_API_TOKEN;
+          const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
+          const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
+          const HEADERS = { 
+            "Authorization": `Bearer ${CF_API_TOKEN}`, 
+            "Content-Type": "application/json" 
+          };
 
-          if [ -f commit_msg.txt ]; then
-            mv commit_msg.txt ../commit_msg.txt
-          fi
+          async function getState() {
+            try {
+              const res = await fetch(KV_URL, { headers: HEADERS });
+              if (!res.ok) return null;
+              return await res.json();
+            } catch (e) {
+              return null;
+            }
+          }
 
-          git add .
+          async function setState(data) {
+            try {
+              await fetch(KV_URL, { 
+                method: 'PUT', 
+                headers: HEADERS, 
+                body: JSON.stringify(data) 
+              });
+            } catch (e) {
+              console.error("Failed to update KV state:", e);
+            }
+          }
 
-          if git diff-index --quiet HEAD; then
-            echo "FINAL_MSG=❌ Finished: OpenClaude made no code changes." >> $GITHUB_ENV
-          else
-            if [ ! -s ../commit_msg.txt ]; then
-              echo "No commit_msg.txt from the agent — generating one from the diff instead."
-              DIFF_CONTEXT=$(git diff --cached --stat; echo; git diff --cached | head -c 6000)
-              COMMIT_PROMPT="Write a concise, professional git commit message for this diff. Output ONLY the raw commit message text - no markdown, no code fences, no quotes, no commentary.
+          function runAgent(provider, sessionId, userMsg) {
+            let env = { ...process.env };
+            const args = [];
 
-              $DIFF_CONTEXT"
+            // Configure provider specific settings
+            if (provider === 'gemini') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.5-flash";
+            } else if (provider === 'gemini-lite') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+            } else if (provider === 'groq') {
+              args.push('--provider', 'openai');
+              delete env.CLAUDE_CODE_USE_GEMINI;
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = env.GROQ_API_KEY;
+              env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
+              env.OPENAI_MODEL = env.GROQ_MODEL;
+              env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
+            } else if (provider === 'openrouter') {
+              args.push('--provider', 'openai');
+              delete env.CLAUDE_CODE_USE_GEMINI;
+              delete env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
+              env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
+              env.OPENAI_MODEL = env.OPENROUTER_MODEL;
+            }
+
+            if (sessionId) {
+              args.push('--resume', sessionId);
+            }
+            
+            args.push('-p', userMsg, '--dangerously-skip-permissions');
+
+            const result = spawnSync('openclaude', args, { 
+              encoding: 'utf8', 
+              timeout: 900000, // 15 min per command
+              env: env 
+            });
+            
+            const combinedOutput = (result.stdout || "") + "\n" + (result.stderr || "");
+            const match = combinedOutput.match(/--resume\s+([a-zA-Z0-9_-]+)/);
+            const newSessionId = match ? match[1] : sessionId;
+            
+            const isError = combinedOutput.toLowerCase().includes("error: 429") || 
+                            combinedOutput.toLowerCase().includes("quota exceeded") ||
+                            combinedOutput.toLowerCase().includes("rate limit") ||
+                            result.status !== 0;
+
+            return { 
+              success: !isError && result.status === 0, 
+              output: combinedOutput.trim() || "(No output from agent)", 
+              sessionId: newSessionId, 
+              provider: provider 
+            };
+          }
+
+          async function loop() {
+            let lastMsgId = 0;
+            let lastActivityTime = Date.now();
+            const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 mins idle auto-shutdown
+
+            while(true) {
+              try {
+                const state = await getState();
+                
+                if (state && Number(state.msg_id) > lastMsgId) {
+                  lastMsgId = Number(state.msg_id);
+                  lastActivityTime = Date.now();
+                  const userMsg = String(state.last_user || "").trim();
+                  
+                  await setState({ ...state, status: "thinking" });
+
+                  if (userMsg === '/exit') {
+                    await setState({ ...state, status: "exited", last_agent: "Runner terminated by user." });
+                    process.exit(0);
+                  } 
+                  else if (userMsg === '/push') {
+                    try {
+                      spawnSync('git', ['config', 'user.name', 'OpenClaude Agent'], { stdio: 'inherit' });
+                      spawnSync('git', ['config', 'user.email', 'agent@arnavgr.com'], { stdio: 'inherit' });
+                      spawnSync('git', ['add', '.'], { stdio: 'inherit' });
+                      spawnSync('git', ['commit', '-m', 'Live chat agent update'], { stdio: 'inherit' });
+                      spawnSync('git', ['push', 'origin', 'HEAD'], { stdio: 'inherit' });
+                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes successfully committed and pushed to git." });
+                    } catch (e) {
+                      await setState({ ...state, status: "waiting", last_agent: "❌ Push failed: " + e.message });
+                    }
+                    continue;
+                  }
+
+                  const providers = ['gemini', 'gemini-lite', 'groq', 'openrouter'];
+                  let currentProvider = state.provider || providers[0];
+                  let result = runAgent(currentProvider, state.session_id, userMsg);
+
+                  // Fallback loop if primary provider fails
+                  if (!result.success) {
+                    for (const p of providers) {
+                      if (p === currentProvider) continue;
+                      result = runAgent(p, state.session_id, userMsg);
+                      if (result.success) break;
+                    }
+                  }
+
+                  if (!result.success) {
+                    result.output = "❌ All configured providers failed or hit quotas.\n\n" + result.output;
+                  }
+
+                  await setState({ 
+                    status: "waiting", 
+                    last_user: userMsg, 
+                    last_agent: result.output,
+                    msg_id: lastMsgId,
+                    session_id: result.sessionId,
+                    provider: result.success ? result.provider : state.provider
+                  });
+                }
+
+                // Inactivity check
+                if (Date.now() - lastActivityTime > IDLE_TIMEOUT_MS) {
+                  await setState({ 
+                    ...(state || {}), 
+                    status: "exited", 
+                    last_agent: "⏱️ Runner terminated automatically due to 15 minutes of inactivity." 
+                  });
+                  process.exit(0);
+                }
+
+              } catch (err) {
+                console.error("Bridge runtime error:", err);
+              }
               
-              if [ -n "$CLAUDE_CODE_USE_GEMINI" ]; then
-                if ! openclaude --provider gemini -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null; then
-                  echo "Fallback gemini commit failed."
-                fi
-              else
-                if ! openclaude --provider openai -p "$COMMIT_PROMPT" --dangerously-skip-permissions > ../commit_msg_fallback.txt 2>/dev/null; then
-                  echo "Fallback openai commit failed."
-                fi
-              fi
+              await new Promise(r => setTimeout(r, 3000));
+            }
+          }
 
-              if [ -s ../commit_msg_fallback.txt ]; then
-                sed -e '/^```/d' -e "s/^['\"]//" -e "s/['\"]\$//" ../commit_msg_fallback.txt > ../commit_msg.txt
-              fi
-            fi
+          loop();
+          EOF
 
-            if [ -s ../commit_msg.txt ]; then
-              echo "Using AI-generated commit message."
-              git commit -F ../commit_msg.txt
-            else
-              CHANGED=$(git diff --cached --name-only | tr '\n' ' ')
-              echo "No AI commit message available — falling back to a file list."
-              git commit -m "AI Update: modified ${CHANGED}"
-            fi
-
-            git push origin "$TARGET_BRANCH"
-            echo "FINAL_MSG=✅ Done: Changes pushed to $TARGET_BRANCH." >> $GITHUB_ENV
-          fi
-          
       - name: Final KV Status Update
         if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
         run: |
-          if [ "$JOB_STATUS" == "success" ]; then
-            STATUS_MSG="${FINAL_MSG:-✅ Done: Job completed successfully.}"
-          else
-            STATUS_MSG="❌ Failed: OpenClaude crashed. Check GH logs."
-          fi
+          node << 'EOF'
+          const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+          const CF_API_TOKEN = process.env.CF_API_TOKEN;
+          const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
+          const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
+          const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
 
-          URL="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/agent_status"
-
-          HTTP_CODE=$(curl -s -o /tmp/kv_resp.txt -w "%{http_code}" \
-            -X PUT "$URL" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: text/plain; charset=utf-8" \
-            --data-binary "$STATUS_MSG")
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Final KV update failed. HTTP $HTTP_CODE"
-            echo "Response body:"
-            cat /tmp/kv_resp.txt
-            echo
-            exit 0   # don't fail the whole workflow over a status update
-          else
-            echo "Final KV update OK (HTTP $HTTP_CODE): $STATUS_MSG"
-          fi
+          async function finalize() {
+            try {
+              const res = await fetch(KV_URL, { headers: HEADERS });
+              let state = res.ok ? await res.json() : {};
+              state.status = "exited";
+              if (!state.last_agent || !state.last_agent.includes("terminated")) {
+                state.last_agent = "Session ended.\n\n" + (state.last_agent || "");
+              }
+              await fetch(KV_URL, { method: 'PUT', headers: HEADERS, body: JSON.stringify(state) });
+            } catch (e) {
+              console.error("Finalization failed:", e);
+            }
+          }
+          finalize();
+          EOF
