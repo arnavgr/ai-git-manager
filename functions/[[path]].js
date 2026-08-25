@@ -13,6 +13,12 @@ export async function onRequest(context) {
     
     if (pin !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
 
+    const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { msg_id: 0 };
+
+    if (state.status === "exited") {
+      return new Response("Session already ended — start a new one from the main page.", { status: 409 });
+    }
+
     const msg = String(data.get("msg") || "");
     const file = data.get("file");
     let attachment = null;
@@ -24,8 +30,6 @@ export async function onRequest(context) {
       };
     }
 
-    const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { msg_id: 0 };
-    
     const newState = {
       ...state,
       status: "thinking",
@@ -66,7 +70,7 @@ export async function onRequest(context) {
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
-    STATUS: ${esc(state.status.toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
+    STATUS: ${esc((state.status || "unknown").toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
   </div>
   <div style="color:#888;font-size:11px;margin-bottom:10px;word-break:break-all;">
     📡 ${esc(state.model_info || "Model: Pending initial run...")}
@@ -155,7 +159,7 @@ export async function onRequest(context) {
   }
 
   // =========================================================================
-  // GET / — Main Dispatch Form (Provider Selector + Effort + File Attachment)
+  // GET / — Main Dispatch Form
   // =========================================================================
   return new Response(`<!DOCTYPE html>
 <html>
