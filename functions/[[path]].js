@@ -48,7 +48,8 @@ export async function onRequest(context) {
     const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { 
       status: "waiting", 
       last_agent: "Waiting for agent to boot...",
-      model_info: "Initializing..."
+      model_info: "Initializing...",
+      effort: "high"
     };
     
     const isThinking = state.status === "thinking" || state.status === "booting";
@@ -65,7 +66,7 @@ export async function onRequest(context) {
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
-    STATUS: ${esc(state.status.toUpperCase())}
+    STATUS: ${esc(state.status.toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
   </div>
   <div style="color:#888;font-size:11px;margin-bottom:10px;word-break:break-all;">
     📡 ${esc(state.model_info || "Model: Pending initial run...")}
@@ -96,7 +97,7 @@ export async function onRequest(context) {
   }
 
   // =========================================================================
-  // POST / — Dispatch the GitHub Action with Provider Choice & Optional File
+  // POST / — Dispatch the GitHub Action with Provider Choice, Effort & File
   // =========================================================================
   if (request.method === "POST" && url.pathname === "/") {
     const data = await request.formData();
@@ -107,6 +108,7 @@ export async function onRequest(context) {
     const repo = String(data.get("repo") || "");
     const branch = String(data.get("branch") || "main");
     const providerChoice = String(data.get("provider") || "auto");
+    const effortChoice = String(data.get("effort") || "high");
 
     const file = data.get("file");
     let attachment = null;
@@ -125,7 +127,8 @@ export async function onRequest(context) {
       msg_id: 1,
       attachment: attachment,
       provider_choice: providerChoice,
-      model_info: `Selected: ${providerChoice.toUpperCase()} (Starting...)`,
+      effort: effortChoice,
+      model_info: `Selected: ${providerChoice.toUpperCase()} [Effort: ${effortChoice.toUpperCase()}] (Starting...)`,
       session_id: null,
       provider: null
     }));
@@ -152,7 +155,7 @@ export async function onRequest(context) {
   }
 
   // =========================================================================
-  // GET / — Main Dispatch Form (Provider Selector + File Attachment)
+  // GET / — Main Dispatch Form (Provider Selector + Effort + File Attachment)
   // =========================================================================
   return new Response(`<!DOCTYPE html>
 <html>
@@ -172,11 +175,23 @@ export async function onRequest(context) {
     
     <label style="color:#aaa;font-size:11px;">Primary Provider / Fallback Mode:</label>
     <select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
-      <option value="auto">Auto Fallback (Gemini 3.5 -> 3.1 Lite -> Groq -> OpenRouter)</option>
-      <option value="gemini">Gemini 3.5 Flash</option>
-      <option value="gemini-lite">Gemini 3.1 Flash Lite</option>
-      <option value="groq">Groq (Qwen 3.6 27B)</option>
+      <option value="auto">Auto Fallback (3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> Empero Qwen 3.8 -> 3.1 Lite -> OpenRouter -> Groq)</option>
+      <option value="gemini-3.7">Gemini 3.7 Flash</option>
+      <option value="gemini-3.6">Gemini 3.6 Flash</option>
+      <option value="gemini-3.5">Gemini 3.5 Flash</option>
+      <option value="gemini-3.5-lite">Gemini 3.5 Flash Lite</option>
+      <option value="empero-qwen">Empero Qwen 3.8 (27B-FP8)</option>
+      <option value="gemini-3.1-lite">Gemini 3.1 Flash Lite</option>
       <option value="openrouter">OpenRouter Free</option>
+      <option value="groq">Groq (Qwen 3.6 27B)</option>
+    </select>
+
+    <label style="color:#aaa;font-size:11px;">Reasoning Effort Level:</label>
+    <select name="effort" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
+      <option value="high" selected>High (Deepest Reasoning / Maximum Effort)</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="none">None (Direct Execution)</option>
     </select>
 
     <label style="color:#aaa;font-size:11px;">Initial Prompt:</label>

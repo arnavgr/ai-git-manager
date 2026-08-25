@@ -72,10 +72,14 @@ jobs:
           };
 
           const MODEL_LABELS = {
-            'gemini': 'Gemini 3.5 Flash',
-            'gemini-lite': 'Gemini 3.1 Flash-Lite',
-            'groq': 'Groq (Qwen 3.6 27B)',
-            'openrouter': 'OpenRouter Free'
+            'gemini-3.7': 'Gemini 3.7 Flash',
+            'gemini-3.6': 'Gemini 3.6 Flash',
+            'gemini-3.5': 'Gemini 3.5 Flash',
+            'gemini-3.5-lite': 'Gemini 3.5 Flash-Lite',
+            'empero-qwen': 'Empero Qwen 3.8 (27B-FP8)',
+            'gemini-3.1-lite': 'Gemini 3.1 Flash-Lite',
+            'openrouter': 'OpenRouter Free',
+            'groq': 'Groq (Qwen 3.6 27B)'
           };
 
           async function getState() {
@@ -100,41 +104,71 @@ jobs:
             }
           }
 
-          function runAgent(provider, sessionId, userMsg) {
+          function runAgent(provider, sessionId, userMsg, effort) {
             let env = { ...process.env };
             const args = [];
 
-            if (provider === 'gemini') {
+            // Configure effort environment
+            const effortLevel = (effort || 'high').toLowerCase();
+            env.CLAUDE_CODE_EFFORT = effortLevel;
+
+            // Reset base provider configs
+            delete env.CLAUDE_CODE_USE_GEMINI;
+            delete env.CLAUDE_CODE_USE_OPENAI;
+            delete env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+
+            if (provider === 'gemini-3.7') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.7-flash";
+            } else if (provider === 'gemini-3.6') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.6-flash";
+            } else if (provider === 'gemini-3.5') {
               args.push('--provider', 'gemini');
               env.CLAUDE_CODE_USE_GEMINI = "1";
               env.GEMINI_MODEL = "gemini-3.5-flash";
-            } else if (provider === 'gemini-lite') {
+            } else if (provider === 'gemini-3.5-lite') {
+              args.push('--provider', 'gemini');
+              env.CLAUDE_CODE_USE_GEMINI = "1";
+              env.GEMINI_MODEL = "gemini-3.5-flash-lite";
+            } else if (provider === 'empero-qwen') {
+              args.push('--provider', 'openai');
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = "free";
+              env.OPENAI_BASE_URL = "https://free.empero.org/v1";
+              env.OPENAI_MODEL = "Qwen/Qwen3.8-27B-FP8";
+            } else if (provider === 'gemini-3.1-lite') {
               args.push('--provider', 'gemini');
               env.CLAUDE_CODE_USE_GEMINI = "1";
               env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+            } else if (provider === 'openrouter') {
+              args.push('--provider', 'openai');
+              env.CLAUDE_CODE_USE_OPENAI = "1";
+              env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
+              env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
+              env.OPENAI_MODEL = env.OPENROUTER_MODEL;
             } else if (provider === 'groq') {
               args.push('--provider', 'openai');
-              delete env.CLAUDE_CODE_USE_GEMINI;
               env.CLAUDE_CODE_USE_OPENAI = "1";
               env.OPENAI_API_KEY = env.GROQ_API_KEY;
               env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
               env.OPENAI_MODEL = env.GROQ_MODEL;
               env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
-            } else if (provider === 'openrouter') {
-              args.push('--provider', 'openai');
-              delete env.CLAUDE_CODE_USE_GEMINI;
-              delete env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
-              env.CLAUDE_CODE_USE_OPENAI = "1";
-              env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
-              env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
-              env.OPENAI_MODEL = env.OPENROUTER_MODEL;
             }
 
             if (sessionId) {
               args.push('--resume', sessionId);
             }
             
-            args.push('-p', userMsg, '--dangerously-skip-permissions');
+            // Inject reasoning effort directive into prompt
+            let finalPrompt = userMsg;
+            if (effortLevel !== 'none') {
+              finalPrompt = `[Reasoning Effort: ${effortLevel.toUpperCase()}]\n` + finalPrompt;
+            }
+
+            args.push('-p', finalPrompt, '--dangerously-skip-permissions');
 
             const result = spawnSync('openclaude', args, { 
               encoding: 'utf8', 
@@ -173,6 +207,7 @@ jobs:
                   lastMsgId = Number(state.msg_id);
                   lastActivityTime = Date.now();
                   const userMsg = String(state.last_user || "").trim();
+                  const effort = String(state.effort || "high");
                   
                   await setState({ ...state, status: "thinking" });
 
@@ -220,9 +255,18 @@ jobs:
                   }
 
                   // 2. Build prioritized fallback list
-                  const defaultOrder = ['gemini', 'gemini-lite', 'groq', 'openrouter'];
+                  const defaultOrder = [
+                    'gemini-3.7', 
+                    'gemini-3.6', 
+                    'gemini-3.5', 
+                    'gemini-3.5-lite', 
+                    'empero-qwen', 
+                    'gemini-3.1-lite', 
+                    'openrouter', 
+                    'groq'
+                  ];
+
                   let candidateProviders = [];
-                  
                   if (state.provider_choice && state.provider_choice !== 'auto' && defaultOrder.includes(state.provider_choice)) {
                     candidateProviders = [state.provider_choice, ...defaultOrder.filter(p => p !== state.provider_choice)];
                   } else {
@@ -231,7 +275,7 @@ jobs:
 
                   let activeProvider = state.provider || candidateProviders[0];
                   let failedAttempts = [];
-                  let result = runAgent(activeProvider, state.session_id, instruction);
+                  let result = runAgent(activeProvider, state.session_id, instruction, effort);
 
                   // 3. Fallback Loop
                   if (!result.success) {
@@ -239,14 +283,13 @@ jobs:
                     for (const p of candidateProviders) {
                       if (p === activeProvider) continue;
                       
-                      // Notify UI of active fallback attempt
                       await setState({
                         ...state,
                         status: "thinking",
                         model_info: `⚠️ ${MODEL_LABELS[activeProvider]} failed. Retrying with ${MODEL_LABELS[p]}...`
                       });
 
-                      result = runAgent(p, state.session_id, instruction);
+                      result = runAgent(p, state.session_id, instruction, effort);
                       if (result.success) break;
                       failedAttempts.push(MODEL_LABELS[p] || p);
                     }
@@ -270,8 +313,9 @@ jobs:
                     session_id: result.sessionId,
                     provider: result.success ? result.provider : state.provider,
                     provider_choice: state.provider_choice || 'auto',
+                    effort: effort,
                     model_info: telemetryString,
-                    attachment: null // Clear attachment once consumed
+                    attachment: null
                   });
                 }
 
