@@ -59,6 +59,9 @@ jobs:
         run: |
           node << 'EOF'
           const { spawnSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+
           const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
           const CF_API_TOKEN = process.env.CF_API_TOKEN;
           const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
@@ -66,6 +69,13 @@ jobs:
           const HEADERS = { 
             "Authorization": `Bearer ${CF_API_TOKEN}`, 
             "Content-Type": "application/json" 
+          };
+
+          const MODEL_LABELS = {
+            'gemini': 'Gemini 3.5 Flash',
+            'gemini-lite': 'Gemini 3.1 Flash-Lite',
+            'groq': 'Groq (Qwen 3.6 27B)',
+            'openrouter': 'OpenRouter Free'
           };
 
           async function getState() {
@@ -94,7 +104,6 @@ jobs:
             let env = { ...process.env };
             const args = [];
 
-            // Configure provider specific settings
             if (provider === 'gemini') {
               args.push('--provider', 'gemini');
               env.CLAUDE_CODE_USE_GEMINI = "1";
@@ -140,6 +149,7 @@ jobs:
             const isError = combinedOutput.toLowerCase().includes("error: 429") || 
                             combinedOutput.toLowerCase().includes("quota exceeded") ||
                             combinedOutput.toLowerCase().includes("rate limit") ||
+                            combinedOutput.toLowerCase().includes("invalid_request_error") ||
                             result.status !== 0;
 
             return { 
@@ -167,7 +177,12 @@ jobs:
                   await setState({ ...state, status: "thinking" });
 
                   if (userMsg === '/exit') {
-                    await setState({ ...state, status: "exited", last_agent: "Runner terminated by user." });
+                    await setState({ 
+                      ...state, 
+                      status: "exited", 
+                      model_info: "Session terminated.",
+                      last_agent: "Runner terminated by user." 
+                    });
                     process.exit(0);
                   } 
                   else if (userMsg === '/push') {
@@ -177,28 +192,74 @@ jobs:
                       spawnSync('git', ['add', '.'], { stdio: 'inherit' });
                       spawnSync('git', ['commit', '-m', 'Live chat agent update'], { stdio: 'inherit' });
                       spawnSync('git', ['push', 'origin', 'HEAD'], { stdio: 'inherit' });
-                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes successfully committed and pushed to git." });
+                      await setState({ 
+                        ...state, 
+                        status: "waiting", 
+                        last_agent: "✅ Changes successfully committed and pushed to git." 
+                      });
                     } catch (e) {
-                      await setState({ ...state, status: "waiting", last_agent: "❌ Push failed: " + e.message });
+                      await setState({ 
+                        ...state, 
+                        status: "waiting", 
+                        last_agent: "❌ Push failed: " + e.message 
+                      });
                     }
                     continue;
                   }
 
-                  const providers = ['gemini', 'gemini-lite', 'groq', 'openrouter'];
-                  let currentProvider = state.provider || providers[0];
-                  let result = runAgent(currentProvider, state.session_id, userMsg);
+                  // 1. Process File Attachment if present
+                  let instruction = userMsg;
+                  if (state.attachment && state.attachment.name && state.attachment.content) {
+                    try {
+                      const targetFilePath = path.join(process.cwd(), state.attachment.name);
+                      fs.writeFileSync(targetFilePath, state.attachment.content, 'utf8');
+                      instruction = `[System Notice: The user uploaded file '${state.attachment.name}', which has been written to the repo root directory.]\n\n` + userMsg;
+                    } catch (e) {
+                      console.error("Failed to write attachment:", e);
+                    }
+                  }
 
-                  // Fallback loop if primary provider fails
+                  // 2. Build prioritized fallback list
+                  const defaultOrder = ['gemini', 'gemini-lite', 'groq', 'openrouter'];
+                  let candidateProviders = [];
+                  
+                  if (state.provider_choice && state.provider_choice !== 'auto' && defaultOrder.includes(state.provider_choice)) {
+                    candidateProviders = [state.provider_choice, ...defaultOrder.filter(p => p !== state.provider_choice)];
+                  } else {
+                    candidateProviders = defaultOrder;
+                  }
+
+                  let activeProvider = state.provider || candidateProviders[0];
+                  let failedAttempts = [];
+                  let result = runAgent(activeProvider, state.session_id, instruction);
+
+                  // 3. Fallback Loop
                   if (!result.success) {
-                    for (const p of providers) {
-                      if (p === currentProvider) continue;
-                      result = runAgent(p, state.session_id, userMsg);
+                    failedAttempts.push(MODEL_LABELS[activeProvider] || activeProvider);
+                    for (const p of candidateProviders) {
+                      if (p === activeProvider) continue;
+                      
+                      // Notify UI of active fallback attempt
+                      await setState({
+                        ...state,
+                        status: "thinking",
+                        model_info: `⚠️ ${MODEL_LABELS[activeProvider]} failed. Retrying with ${MODEL_LABELS[p]}...`
+                      });
+
+                      result = runAgent(p, state.session_id, instruction);
                       if (result.success) break;
+                      failedAttempts.push(MODEL_LABELS[p] || p);
                     }
                   }
 
                   if (!result.success) {
                     result.output = "❌ All configured providers failed or hit quotas.\n\n" + result.output;
+                  }
+
+                  // 4. Construct Telemetry Status String
+                  let telemetryString = `Active: ${MODEL_LABELS[result.provider] || result.provider}`;
+                  if (failedAttempts.length > 0) {
+                    telemetryString += ` | Failed/Skipped: ${failedAttempts.join(', ')}`;
                   }
 
                   await setState({ 
@@ -207,15 +268,18 @@ jobs:
                     last_agent: result.output,
                     msg_id: lastMsgId,
                     session_id: result.sessionId,
-                    provider: result.success ? result.provider : state.provider
+                    provider: result.success ? result.provider : state.provider,
+                    provider_choice: state.provider_choice || 'auto',
+                    model_info: telemetryString,
+                    attachment: null // Clear attachment once consumed
                   });
                 }
 
-                // Inactivity check
                 if (Date.now() - lastActivityTime > IDLE_TIMEOUT_MS) {
                   await setState({ 
                     ...(state || {}), 
                     status: "exited", 
+                    model_info: "Session expired (Inactivity)",
                     last_agent: "⏱️ Runner terminated automatically due to 15 minutes of inactivity." 
                   });
                   process.exit(0);
@@ -247,6 +311,7 @@ jobs:
               const res = await fetch(KV_URL, { headers: HEADERS });
               let state = res.ok ? await res.json() : {};
               state.status = "exited";
+              state.model_info = "Runner disconnected";
               if (!state.last_agent || !state.last_agent.includes("terminated")) {
                 state.last_agent = "Session ended.\n\n" + (state.last_agent || "");
               }
