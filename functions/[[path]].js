@@ -5,6 +5,170 @@ export async function onRequest(context) {
   const esc = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
   // =========================================================================
+  // GET /browse — Dumbphone GitHub Repo Explorer & Downloader
+  // =========================================================================
+  if (url.pathname === "/browse" && request.method === "GET") {
+    const pin = url.searchParams.get("pin") || "";
+    if (env.AUTH_PIN && pin !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
+
+    let repo = (url.searchParams.get("repo") || "").trim();
+    if (repo.startsWith("https://github.com/")) {
+      repo = repo.replace("https://github.com/", "");
+    }
+    repo = repo.replace(/\/$/, "");
+
+    const filePath = url.searchParams.get("path") || "";
+    const action = url.searchParams.get("action") || "";
+
+    // 1. Home screen of /browse: list authenticated user's repos + manual input form
+    if (!repo) {
+      let repoListHtml = "";
+      try {
+        const ghRes = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
+          headers: {
+            "User-Agent": "CF-Pages-Dumbphone-Browser",
+            "Accept": "application/vnd.github+json",
+            ...(env.GH_PAT && { Authorization: `Bearer ${env.GH_PAT}` })
+          }
+        });
+
+        if (ghRes.ok) {
+          const repos = await ghRes.json();
+          if (Array.isArray(repos) && repos.length > 0) {
+            for (const r of repos) {
+              repoListHtml += `<li>📦 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(r.full_name)}" style="color:#0f0;text-decoration:none;">${esc(r.full_name)}</a> ${r.private ? '<span style="color:#888;font-size:10px;">[private]</span>' : ''}</li>`;
+            }
+          }
+        }
+      } catch (e) {
+        repoListHtml = `<li style="color:#f55;">Could not fetch repos: ${esc(e.message)}</li>`;
+      }
+
+      return new Response(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitHub File Browser</title>
+</head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
+  <div style="font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:10px;">
+    <b>GITHUB BROWSER</b> | <a href="/?pin=${encodeURIComponent(pin)}" style="color:#888;">[Agent Dispatch]</a> | <a href="/chat?token=${encodeURIComponent(pin)}" style="color:#888;">[Live Chat]</a>
+  </div>
+
+  <form method="GET" action="/browse">
+    <input type="hidden" name="pin" value="${esc(pin)}">
+    <label style="color:#aaa;font-size:11px;">Enter any repository (owner/repo):</label><br>
+    <input type="text" name="repo" placeholder="owner/repo" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:8px;margin-top:4px;box-sizing:border-box;" required><br><br>
+    <button type="submit" style="width:100%;padding:10px;background:#0f0;color:#000;border:none;font-weight:bold;font-size:14px;">BROWSE REPO</button>
+  </form>
+
+  ${repoListHtml ? `
+  <h4 style="color:#aaa;margin-top:20px;margin-bottom:8px;font-size:12px;">YOUR REPOSITORIES:</h4>
+  <ul style="list-style:none;padding-left:0;line-height:1.9;margin:0;font-size:13px;">${repoListHtml}</ul>
+  ` : ''}
+</body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+
+    const [owner, repoName] = repo.split("/");
+    if (!owner || !repoName) {
+      return new Response("Invalid repository format. Please use 'owner/repo'.", { status: 400 });
+    }
+
+    // 2. Direct Raw Download Handler (Using GitHub raw media stream)
+    if (action === "download" || action === "raw") {
+      const rawRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
+        headers: {
+          "User-Agent": "CF-Pages-Dumbphone-Browser",
+          "Accept": "application/vnd.github.raw+json",
+          ...(env.GH_PAT && { Authorization: `Bearer ${env.GH_PAT}` })
+        }
+      });
+
+      if (!rawRes.ok) {
+        return new Response("File not found or inaccessible.", { status: rawRes.status });
+      }
+
+      const fileName = filePath.split("/").pop() || "downloaded_file";
+      const isDownload = action === "download";
+
+      return new Response(rawRes.body, {
+        headers: {
+          "Content-Type": isDownload ? "application/octet-stream" : "text/plain; charset=utf-8",
+          ...(isDownload && { "Content-Disposition": `attachment; filename="${fileName}"` })
+        }
+      });
+    }
+
+    // 3. Directory Listing via GitHub Contents API
+    const apiRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
+      headers: {
+        "User-Agent": "CF-Pages-Dumbphone-Browser",
+        "Accept": "application/vnd.github+json",
+        ...(env.GH_PAT && { Authorization: `Bearer ${env.GH_PAT}` })
+      }
+    });
+
+    if (!apiRes.ok) {
+      const errText = await apiRes.text();
+      return new Response(`<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width"><title>Error</title></head>
+<body style="background:#000;color:#f55;font-family:monospace;padding:10px;">
+  <h3>GitHub Error (${apiRes.status})</h3>
+  <pre style="white-space:pre-wrap;word-break:break-all;color:#aaa;">${esc(errText)}</pre>
+  <p><a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#0f0;">← Back to Repos</a></p>
+</body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" }, status: apiRes.status });
+    }
+
+    const items = await apiRes.json();
+    const entries = Array.isArray(items) ? items : [items];
+
+    let parentPath = "";
+    if (filePath) {
+      const parts = filePath.split("/").filter(Boolean);
+      parts.pop();
+      parentPath = parts.join("/");
+    }
+
+    let listHtml = "";
+    if (filePath) {
+      listHtml += `<li><a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(parentPath)}" style="color:#0f0;text-decoration:none;">[.. Up one level]</a></li>`;
+    }
+
+    for (const item of entries) {
+      if (item.type === "dir") {
+        listHtml += `<li>📁 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}" style="color:#0f0;text-decoration:none;">${esc(item.name)}/</a></li>`;
+      } else {
+        const sizeStr = item.size ? `(${(item.size / 1024).toFixed(1)} KB)` : '';
+        listHtml += `<li>📄 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=download" style="color:#fff;">${esc(item.name)}</a> <span style="color:#666;font-size:11px;">${sizeStr}</span> <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=raw" style="color:#0f0;font-size:11px;margin-left:6px;">[view]</a></li>`;
+      }
+    }
+
+    return new Response(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(repo)}/${esc(filePath)}</title>
+</head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
+  <div style="font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:8px;">
+    <b>/${esc(repo)}${filePath ? '/' + esc(filePath) : ''}</b>
+  </div>
+  <div style="font-size:11px;margin-bottom:10px;">
+    <a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#888;">[Repo List]</a> &nbsp;
+    <a href="/?pin=${encodeURIComponent(pin)}" style="color:#888;">[Agent]</a> &nbsp;
+    <a href="/chat?token=${encodeURIComponent(pin)}" style="color:#888;">[Chat]</a>
+  </div>
+  <ul style="list-style:none;padding-left:0;line-height:1.9;margin:0;font-size:13px;">${listHtml}</ul>
+</body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
+  // =========================================================================
   // POST /send — User sends a new message or file from chat
   // =========================================================================
   if (url.pathname === "/send" && request.method === "POST") {
@@ -24,7 +188,6 @@ export async function onRequest(context) {
     let attachment = null;
 
     if (file && typeof file === "object" && file.size > 0) {
-      // Guard: 10MB maximum upload limit for KV safety
       if (file.size > 10 * 1024 * 1024) {
         return new Response("File exceeds 10MB limit.", { status: 413 });
       }
@@ -76,6 +239,7 @@ export async function onRequest(context) {
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
     STATUS: ${esc((state.status || "unknown").toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
     &nbsp;·&nbsp;<a href="#latest" style="color:#0f0;">jump to latest ↓</a>
+    &nbsp;·&nbsp;<a href="/browse?pin=${encodeURIComponent(token)}" style="color:#888;">[Browse Repos]</a>
   </div>
   <div style="color:#888;font-size:11px;margin-bottom:10px;word-break:break-all;">
     📡 ${esc(state.model_info || "Model: Pending initial run...")}
@@ -100,7 +264,8 @@ export async function onRequest(context) {
   <div style="font-size:11px;color:#777;">
     Changes auto-push after every message.<br>
     Commands: <b>/push</b> (manual retry), <b>/revert</b> (undo last commit), <b>/exit</b> (terminate runner)<br>
-    <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a>
+    <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a> |
+    <a href="/browse?pin=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Browse Files ]</a>
   </div>` : `<div style="color:#f55;">Runner terminated. Return to <a href="/" style="color:#0f0;">main page</a> to start a new task.</div>`}
 </body>
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -170,6 +335,7 @@ export async function onRequest(context) {
   // =========================================================================
   // GET / — Main Dispatch Form
   // =========================================================================
+  const pinParam = url.searchParams.get("pin") || "";
   return new Response(`<!DOCTYPE html>
 <html>
 <head>
@@ -178,9 +344,12 @@ export async function onRequest(context) {
   <title>CloudPhone Agent</title>
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;">
-  <h2>Live Chat Agent</h2>
+  <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:10px;">
+    <h2 style="margin:0;font-size:16px;">Live Chat Agent</h2>
+    <a href="/browse?pin=${encodeURIComponent(pinParam)}" style="color:#0f0;font-size:12px;">📁 Browse Repos</a>
+  </div>
   <form method="POST" action="/" enctype="multipart/form-data">
-    <input type="password" name="pin" placeholder="PIN" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;" required>
+    <input type="password" name="pin" value="${esc(pinParam)}" placeholder="PIN" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;" required>
     
     <label style="color:#aaa;font-size:11px;">Target Repository & Branch:</label>
     <input type="text" name="repo" value="arnavgr/" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;" required>
