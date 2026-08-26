@@ -24,6 +24,10 @@ export async function onRequest(context) {
     let attachment = null;
 
     if (file && typeof file === "object" && file.size > 0) {
+      // Guard: 10MB maximum upload limit for KV safety
+      if (file.size > 10 * 1024 * 1024) {
+        return new Response("File exceeds 10MB limit.", { status: 413 });
+      }
       attachment = {
         name: file.name || "attached_file.txt",
         content: await file.text()
@@ -43,7 +47,7 @@ export async function onRequest(context) {
   }
 
   // =========================================================================
-  // GET /chat — Live chat interface with Model Telemetry & File Attachment
+  // GET /chat — Live chat interface with Jump Anchor & Full Telemetry
   // =========================================================================
   if (url.pathname === "/chat" && request.method === "GET") {
     const token = url.searchParams.get("token") || "";
@@ -71,14 +75,15 @@ export async function onRequest(context) {
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
     STATUS: ${esc((state.status || "unknown").toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
+    &nbsp;·&nbsp;<a href="#latest" style="color:#0f0;">jump to latest ↓</a>
   </div>
   <div style="color:#888;font-size:11px;margin-bottom:10px;word-break:break-all;">
     📡 ${esc(state.model_info || "Model: Pending initial run...")}
   </div>
   
-  <pre style="white-space:pre-wrap;word-break:break-all;background:#111;padding:10px;border:1px solid #333;font-size:13px;max-height:300px;overflow-y:auto;">${esc(state.last_agent || "No output yet.")}</pre>
+  <pre style="white-space:pre-wrap;word-break:break-all;background:#111;padding:10px;border:1px solid #333;font-size:13px;margin:0 0 10px 0;">${esc(state.last_agent || "No output yet.")}</pre>
+  <a name="latest"></a>
 
-  <br>
   ${state.status !== "exited" ? `
   <form method="POST" action="/send" enctype="multipart/form-data">
     <input type="hidden" name="pin" value="${esc(token)}">
@@ -93,7 +98,8 @@ export async function onRequest(context) {
   </form>
   <br>
   <div style="font-size:11px;color:#777;">
-    Commands: <b>/push</b> (commit & push), <b>/exit</b> (terminate runner)<br>
+    Changes auto-push after every message.<br>
+    Commands: <b>/push</b> (manual retry), <b>/revert</b> (undo last commit), <b>/exit</b> (terminate runner)<br>
     <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a>
   </div>` : `<div style="color:#f55;">Runner terminated. Return to <a href="/" style="color:#0f0;">main page</a> to start a new task.</div>`}
 </body>
@@ -118,6 +124,9 @@ export async function onRequest(context) {
     let attachment = null;
 
     if (file && typeof file === "object" && file.size > 0) {
+      if (file.size > 10 * 1024 * 1024) {
+        return new Response("File exceeds 10MB limit.", { status: 413 });
+      }
       attachment = {
         name: file.name || "initial_file.txt",
         content: await file.text()

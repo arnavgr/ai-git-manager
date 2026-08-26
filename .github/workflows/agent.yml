@@ -58,7 +58,7 @@ jobs:
         working-directory: ./target
         run: |
           node << 'EOF'
-          const { spawnSync } = require('child_process');
+          const { spawn, spawnSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
 
@@ -82,6 +82,15 @@ jobs:
             'groq': 'Groq (Qwen 3.6 27B)'
           };
 
+          // Strict rate-limit/quota indicators only (excluded generic invalid_request_error)
+          const RATE_LIMIT_PATTERNS = [
+            /error:\s*429/i,
+            /rate.?limit/i,
+            /quota exceeded/i,
+            /resource_exhausted/i,
+            /too many requests/i
+          ];
+
           async function getState() {
             try {
               const res = await fetch(KV_URL, { headers: HEADERS });
@@ -104,96 +113,151 @@ jobs:
             }
           }
 
-          function runAgent(provider, sessionId, userMsg, effort) {
-            let env = { ...process.env };
-            const args = [];
+          function pushChanges() {
+            try {
+              const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
+              if (!status.stdout || !status.stdout.trim()) {
+                return { success: true, message: "ℹ️ No code changes detected to push." };
+              }
 
-            const effortLevel = (effort || 'high').toLowerCase();
-            env.CLAUDE_CODE_EFFORT = effortLevel;
+              spawnSync('git', ['add', '.'], { stdio: 'inherit' });
 
-            delete env.CLAUDE_CODE_USE_OPENAI;
-            delete env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS;
+              const commit = spawnSync('git', ['commit', '-m', 'Live chat agent update'], { encoding: 'utf8' });
+              if (commit.status !== 0) {
+                return { success: false, message: "❌ Commit failed: " + (commit.stderr || commit.stdout || "unknown error").trim() };
+              }
 
-            if (provider === 'gemini-3.7') {
-              args.push('--provider', 'gemini', '--model', 'gemini-3.7-flash');
-            } else if (provider === 'gemini-3.6') {
-              args.push('--provider', 'gemini', '--model', 'gemini-3.6-flash');
-            } else if (provider === 'gemini-3.5') {
-              args.push('--provider', 'gemini', '--model', 'gemini-3.5-flash');
-            } else if (provider === 'gemini-3.5-lite') {
-              args.push('--provider', 'gemini', '--model', 'gemini-3.5-flash-lite');
-            } else if (provider === 'empero-qwen') {
-              args.push('--provider', 'openai', '--model', 'Qwen/Qwen3.8-27B-FP8');
-              env.CLAUDE_CODE_USE_OPENAI = "1";
-              env.OPENAI_API_KEY = "free";
-              env.OPENAI_BASE_URL = "https://free.empero.org/v1";
-            } else if (provider === 'gemini-3.1-lite') {
-              args.push('--provider', 'gemini', '--model', 'gemini-3.1-flash-lite');
-            } else if (provider === 'openrouter') {
-              args.push('--provider', 'openai', '--model', process.env.OPENROUTER_MODEL);
-              env.CLAUDE_CODE_USE_OPENAI = "1";
-              env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
-              env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
-              env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.OPENROUTER_MODEL]: 4000 });
-            } else if (provider === 'groq') {
-              args.push('--provider', 'openai', '--model', process.env.GROQ_MODEL);
-              env.CLAUDE_CODE_USE_OPENAI = "1";
-              env.OPENAI_API_KEY = env.GROQ_API_KEY;
-              env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
-              env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.GROQ_MODEL]: 16384 });
+              const push = spawnSync('git', ['push', 'origin', 'HEAD'], { encoding: 'utf8' });
+              if (push.status !== 0) {
+                return { success: false, message: "❌ Push failed: " + (push.stderr || push.stdout || "unknown error").trim() };
+              }
+
+              return { success: true, message: "✅ Changes committed and pushed to remote." };
+            } catch (e) {
+              return { success: false, message: "❌ Push error: " + e.message };
             }
-
-            if (sessionId) {
-              args.push('--resume', sessionId);
-            }
-            
-            let finalPrompt = userMsg;
-            if (effortLevel !== 'none') {
-              finalPrompt = `[Reasoning Effort: ${effortLevel.toUpperCase()}]\n` + finalPrompt;
-            }
-
-            args.push('-p', finalPrompt, '--dangerously-skip-permissions');
-
-            const result = spawnSync('openclaude', args, { 
-              encoding: 'utf8', 
-              timeout: 900000, // 15 min per command
-              env: env 
-            });
-            
-            const spawnErrorMsg = result.error ? `\n[spawn error: ${result.error.message}]` : "";
-            const combinedOutput = (result.stdout || "") + "\n" + (result.stderr || "") + spawnErrorMsg;
-            const match = combinedOutput.match(/--resume\s+([a-zA-Z0-9_-]+)/);
-            const newSessionId = match ? match[1] : sessionId;
-            
-            const isError = combinedOutput.toLowerCase().includes("error: 429") || 
-                            combinedOutput.toLowerCase().includes("quota exceeded") ||
-                            combinedOutput.toLowerCase().includes("rate limit") ||
-                            combinedOutput.toLowerCase().includes("invalid_request_error") ||
-                            result.status !== 0;
-
-            return { 
-              success: !isError && result.status === 0, 
-              output: combinedOutput.trim() || "(No output from agent)", 
-              sessionId: newSessionId, 
-              provider: provider 
-            };
           }
+
+          function runAgentAsync(provider, sessionId, userMsg, effort) {
+            return new Promise((resolve) => {
+              let env = { ...process.env };
+              const args = [];
+
+              const effortLevel = (effort || 'high').toLowerCase();
+              env.CLAUDE_CODE_EFFORT = effortLevel;
+
+              // Belt-and-suspenders configuration: populate both CLI flags and environment variables
+              if (provider.startsWith('gemini')) {
+                args.push('--provider', 'gemini');
+                env.CLAUDE_CODE_USE_GEMINI = "1";
+
+                if (provider === 'gemini-3.7') {
+                  args.push('--model', 'gemini-3.7-flash');
+                  env.GEMINI_MODEL = "gemini-3.7-flash";
+                } else if (provider === 'gemini-3.6') {
+                  args.push('--model', 'gemini-3.6-flash');
+                  env.GEMINI_MODEL = "gemini-3.6-flash";
+                } else if (provider === 'gemini-3.5') {
+                  args.push('--model', 'gemini-3.5-flash');
+                  env.GEMINI_MODEL = "gemini-3.5-flash";
+                } else if (provider === 'gemini-3.5-lite') {
+                  args.push('--model', 'gemini-3.5-flash-lite');
+                  env.GEMINI_MODEL = "gemini-3.5-flash-lite";
+                } else if (provider === 'gemini-3.1-lite') {
+                  args.push('--model', 'gemini-3.1-flash-lite');
+                  env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+                }
+              } else if (provider === 'empero-qwen') {
+                args.push('--provider', 'openai', '--model', 'Qwen/Qwen3.8-27B-FP8');
+                env.CLAUDE_CODE_USE_OPENAI = "1";
+                env.OPENAI_API_KEY = "free";
+                env.OPENAI_BASE_URL = "https://free.empero.org/v1";
+                env.OPENAI_MODEL = "Qwen/Qwen3.8-27B-FP8";
+              } else if (provider === 'openrouter') {
+                args.push('--provider', 'openai', '--model', process.env.OPENROUTER_MODEL);
+                env.CLAUDE_CODE_USE_OPENAI = "1";
+                env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
+                env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
+                env.OPENAI_MODEL = env.OPENROUTER_MODEL;
+                env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "4000";
+                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.OPENROUTER_MODEL]: 4000 });
+              } else if (provider === 'groq') {
+                args.push('--provider', 'openai', '--model', process.env.GROQ_MODEL);
+                env.CLAUDE_CODE_USE_OPENAI = "1";
+                env.OPENAI_API_KEY = env.GROQ_API_KEY;
+                env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
+                env.OPENAI_MODEL = process.env.GROQ_MODEL;
+                env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
+                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.GROQ_MODEL]: 16384 });
+              }
+
+              if (sessionId) {
+                args.push('--resume', sessionId);
+              }
+
+              let finalPrompt = userMsg;
+              if (effortLevel !== 'none') {
+                finalPrompt = `[Reasoning Effort: ${effortLevel.toUpperCase()}]\n` + finalPrompt;
+              }
+
+              args.push('-p', finalPrompt, '--dangerously-skip-permissions');
+
+              const child = spawn('openclaude', args, { env });
+
+              let combinedOutput = "";
+              let killedForRateLimit = false;
+
+              const timer = setTimeout(() => {
+                child.kill('SIGTERM');
+              }, 900000); // 15 min ceiling per attempt
+
+              function onChunk(buf) {
+                const chunk = buf.toString();
+                combinedOutput += chunk;
+                if (!killedForRateLimit && RATE_LIMIT_PATTERNS.some(p => p.test(chunk))) {
+                  killedForRateLimit = true;
+                  child.kill('SIGTERM');
+                }
+              }
+
+              child.stdout.on('data', onChunk);
+              child.stderr.on('data', onChunk);
+
+              child.on('close', (code) => {
+                clearTimeout(timer);
+                const match = combinedOutput.match(/--resume\s+([a-zA-Z0-9_-]+)/);
+                const newSessionId = match ? match[1] : sessionId;
+                const isRateLimit = killedForRateLimit || RATE_LIMIT_PATTERNS.some(p => p.test(combinedOutput));
+                const isError = isRateLimit || code !== 0;
+
+                resolve({
+                  success: !isError,
+                  output: combinedOutput.trim() || "(No output from agent)",
+                  sessionId: newSessionId,
+                  provider,
+                  isRateLimit
+                });
+              });
+            });
+          }
+
+          spawnSync('git', ['config', 'user.name', 'OpenClaude Agent'], { stdio: 'inherit' });
+          spawnSync('git', ['config', 'user.email', 'agent@arnavgr.com'], { stdio: 'inherit' });
 
           async function loop() {
             let lastMsgId = 0;
             let lastActivityTime = Date.now();
-            const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 mins idle auto-shutdown
+            const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
             while(true) {
               try {
                 const state = await getState();
-                
+
                 if (state && Number(state.msg_id) > lastMsgId) {
                   lastMsgId = Number(state.msg_id);
-                  lastActivityTime = Date.now();
                   const userMsg = String(state.last_user || "").trim();
                   const effort = String(state.effort || "high");
-                  
+
                   await setState({ ...state, status: "thinking" });
 
                   if (userMsg === '/exit') {
@@ -201,46 +265,52 @@ jobs:
                       ...state, 
                       status: "exited", 
                       model_info: "Session terminated.",
-                      last_agent: "Runner terminated by user." 
+                      last_agent: "Runner terminated by user.",
+                      attachment: null 
                     });
                     process.exit(0);
-                  } 
+                  }
                   else if (userMsg === '/push') {
-                    const runGit = (gitArgs) => spawnSync('git', gitArgs, { encoding: 'utf8' });
-
-                    runGit(['config', 'user.name', 'OpenClaude Agent']);
-                    runGit(['config', 'user.email', 'agent@arnavgr.com']);
-                    runGit(['add', '.']);
-
-                    const commit = runGit(['commit', '-m', 'Live chat agent update']);
-                    const commitOutput = ((commit.stdout || "") + (commit.stderr || "")).trim();
-                    const nothingToCommit = commit.status !== 0 && /nothing to commit/i.test(commitOutput);
-
-                    if (commit.status !== 0 && !nothingToCommit) {
-                      await setState({ ...state, status: "waiting", last_agent: "❌ Commit failed:\n\n" + commitOutput });
-                      continue;
-                    }
-
-                    const push = runGit(['push', 'origin', 'HEAD']);
-                    const pushOutput = ((push.stdout || "") + (push.stderr || "")).trim();
-
-                    if (push.status !== 0) {
-                      await setState({ ...state, status: "waiting", last_agent: "❌ Push failed:\n\n" + pushOutput });
-                    } else if (nothingToCommit) {
-                      await setState({ ...state, status: "waiting", last_agent: "ℹ️ Nothing new to commit — working tree already matched HEAD. Push checked and OK." });
+                    const pushResult = pushChanges();
+                    await setState({ 
+                      ...state, 
+                      status: "waiting", 
+                      last_agent: pushResult.message,
+                      attachment: null 
+                    });
+                    lastActivityTime = Date.now();
+                    continue;
+                  }
+                  else if (userMsg === '/revert') {
+                    const revert = spawnSync('git', ['revert', '--no-edit', 'HEAD'], { encoding: 'utf8' });
+                    if (revert.status !== 0) {
+                      await setState({ 
+                        ...state, 
+                        status: "waiting", 
+                        last_agent: "❌ Revert failed: " + (revert.stderr || revert.stdout || "unknown error").trim(),
+                        attachment: null 
+                      });
                     } else {
-                      await setState({ ...state, status: "waiting", last_agent: "✅ Changes successfully committed and pushed to git." });
+                      const pushResult = pushChanges();
+                      await setState({ 
+                        ...state, 
+                        status: "waiting", 
+                        last_agent: "↩️ Reverted the last commit.\n" + pushResult.message,
+                        attachment: null 
+                      });
                     }
+                    lastActivityTime = Date.now();
                     continue;
                   }
 
-                  // 1. Process File Attachment
+                  // 1. Process File Attachment (Sanitized with path.basename)
                   let instruction = userMsg;
                   if (state.attachment && state.attachment.name && state.attachment.content) {
                     try {
-                      const targetFilePath = path.join(process.cwd(), state.attachment.name);
+                      const safeFileName = path.basename(state.attachment.name);
+                      const targetFilePath = path.join(process.cwd(), safeFileName);
                       fs.writeFileSync(targetFilePath, state.attachment.content, 'utf8');
-                      instruction = `[System Notice: The user uploaded file '${state.attachment.name}', which has been written to the repo root directory.]\n\n` + userMsg;
+                      instruction = `[System Notice: The user uploaded file '${safeFileName}', which has been written to the repo root directory.]\n\n` + userMsg;
                     } catch (e) {
                       console.error("Failed to write attachment:", e);
                     }
@@ -267,31 +337,40 @@ jobs:
 
                   let activeProvider = state.provider || candidateProviders[0];
                   let failedAttempts = [];
-                  let result = runAgent(activeProvider, state.session_id, instruction, effort);
+                  let result = await runAgentAsync(activeProvider, state.session_id, instruction, effort);
 
                   // 3. Fallback Execution Loop
                   if (!result.success) {
                     failedAttempts.push(MODEL_LABELS[activeProvider] || activeProvider);
                     for (const p of candidateProviders) {
                       if (p === activeProvider) continue;
-                      
+
                       await setState({
                         ...state,
                         status: "thinking",
-                        model_info: `⚠️ ${MODEL_LABELS[activeProvider]} failed. Retrying with ${MODEL_LABELS[p]}...`
+                        model_info: `⚠️ ${MODEL_LABELS[activeProvider]} hit limit. Switching to ${MODEL_LABELS[p]}...`
                       });
 
-                      result = runAgent(p, state.session_id, instruction, effort);
+                      const continuationMsg = result.isRateLimit
+                        ? `You were interrupted by a rate limit/quota error while working on this task: "${userMsg}". Check your previous edits first and continue exactly where you left off — do not redo work you already completed.`
+                        : instruction;
+
+                      result = await runAgentAsync(p, result.sessionId || state.session_id, continuationMsg, effort);
                       if (result.success) break;
                       failedAttempts.push(MODEL_LABELS[p] || p);
                     }
                   }
 
+                  let finalOutput = result.output;
                   if (!result.success) {
-                    result.output = "❌ All configured providers failed or hit quotas.\n\n" + result.output;
+                    finalOutput = "❌ All configured providers failed or hit quotas.\n\n" + finalOutput;
                   }
 
-                  // 4. Construct Telemetry Status String
+                  // 4. Auto-Push Changes
+                  const pushResult = pushChanges();
+                  finalOutput += "\n\n---\n" + pushResult.message;
+
+                  // 5. Construct Telemetry Status String
                   let telemetryString = `Active: ${MODEL_LABELS[result.provider] || result.provider}`;
                   if (failedAttempts.length > 0) {
                     telemetryString += ` | Failed/Skipped: ${failedAttempts.join(', ')}`;
@@ -300,7 +379,7 @@ jobs:
                   await setState({ 
                     status: "waiting", 
                     last_user: userMsg, 
-                    last_agent: result.output,
+                    last_agent: finalOutput,
                     msg_id: lastMsgId,
                     session_id: result.sessionId,
                     provider: result.success ? result.provider : state.provider,
@@ -309,6 +388,8 @@ jobs:
                     model_info: telemetryString,
                     attachment: null
                   });
+
+                  lastActivityTime = Date.now();
                 }
 
                 if (Date.now() - lastActivityTime > IDLE_TIMEOUT_MS) {
@@ -316,7 +397,7 @@ jobs:
                     ...(state || {}), 
                     status: "exited", 
                     model_info: "Session expired (Inactivity)",
-                    last_agent: "⏱️ Runner terminated automatically due to 15 minutes of inactivity." 
+                    last_agent: "⏱️ Runner terminated automatically due to 30 minutes of inactivity." 
                   });
                   process.exit(0);
                 }
@@ -324,7 +405,7 @@ jobs:
               } catch (err) {
                 console.error("Bridge runtime error:", err);
               }
-              
+
               await new Promise(r => setTimeout(r, 3000));
             }
           }
