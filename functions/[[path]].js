@@ -5,7 +5,7 @@ export async function onRequest(context) {
   const esc = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
   // =========================================================================
-  // GET /browse — Dumbphone GitHub Repo Explorer & Downloader
+  // GET /browse — Dumbphone GitHub Repo & Branch Explorer / Downloader
   // =========================================================================
   if (url.pathname === "/browse" && request.method === "GET") {
     const pin = url.searchParams.get("pin") || "";
@@ -19,8 +19,11 @@ export async function onRequest(context) {
 
     const filePath = url.searchParams.get("path") || "";
     const action = url.searchParams.get("action") || "";
+    const branch = (url.searchParams.get("branch") || url.searchParams.get("ref") || "").trim();
+    const branchParam = branch ? `&branch=${encodeURIComponent(branch)}` : "";
+    const refQuery = branch ? `?ref=${encodeURIComponent(branch)}` : "";
 
-    // 1. Home screen of /browse: list authenticated user's repos + manual input form
+    // 1. Home screen: list authenticated user's repos + manual input form
     if (!repo) {
       let repoListHtml = "";
       try {
@@ -76,9 +79,55 @@ export async function onRequest(context) {
       return new Response("Invalid repository format. Please use 'owner/repo'.", { status: 400 });
     }
 
-    // 2. Direct Raw Download Handler (Using GitHub raw media stream)
+    // 2. Branch Selector View (`action=branches`)
+    if (action === "branches") {
+      let branchListHtml = "";
+      try {
+        const bRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/branches?per_page=100`, {
+          headers: {
+            "User-Agent": "CF-Pages-Dumbphone-Browser",
+            "Accept": "application/vnd.github+json",
+            ...(env.GH_PAT && { Authorization: `Bearer ${env.GH_PAT}` })
+          }
+        });
+
+        if (bRes.ok) {
+          const branches = await bRes.json();
+          if (Array.isArray(branches) && branches.length > 0) {
+            for (const b of branches) {
+              const isCurrent = branch === b.name;
+              branchListHtml += `<li>🌿 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(b.name)}" style="color:${isCurrent ? '#ff0' : '#0f0'};text-decoration:none;">${esc(b.name)}</a> ${isCurrent ? '<span style="color:#ff0;font-size:11px;">[active]</span>' : ''}</li>`;
+            }
+          }
+        }
+      } catch (e) {
+        branchListHtml = `<li style="color:#f55;">Could not fetch branches: ${esc(e.message)}</li>`;
+      }
+
+      return new Response(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Branches · ${esc(repo)}</title>
+</head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
+  <div style="font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:8px;">
+    <b>/${esc(repo)}/branches</b>
+  </div>
+  <div style="font-size:11px;margin-bottom:10px;">
+    <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}${branchParam}" style="color:#0f0;">← Back to Files</a> &nbsp;|&nbsp;
+    <a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#888;">[Repo List]</a>
+  </div>
+  <h4 style="color:#aaa;margin-top:10px;margin-bottom:8px;font-size:12px;">AVAILABLE BRANCHES:</h4>
+  <ul style="list-style:none;padding-left:0;line-height:1.9;margin:0;font-size:13px;">${branchListHtml}</ul>
+</body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+
+    // 3. Direct Raw Download Handler for specific Branch / Ref
     if (action === "download" || action === "raw") {
-      const rawRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
+      const rawRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}${refQuery}`, {
         headers: {
           "User-Agent": "CF-Pages-Dumbphone-Browser",
           "Accept": "application/vnd.github.raw+json",
@@ -87,7 +136,7 @@ export async function onRequest(context) {
       });
 
       if (!rawRes.ok) {
-        return new Response("File not found or inaccessible.", { status: rawRes.status });
+        return new Response(`File not found or inaccessible on branch '${branch || "default"}'.`, { status: rawRes.status });
       }
 
       const fileName = filePath.split("/").pop() || "downloaded_file";
@@ -101,8 +150,8 @@ export async function onRequest(context) {
       });
     }
 
-    // 3. Directory Listing via GitHub Contents API
-    const apiRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
+    // 4. Directory Listing for specific Branch / Ref
+    const apiRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}${refQuery}`, {
       headers: {
         "User-Agent": "CF-Pages-Dumbphone-Browser",
         "Accept": "application/vnd.github+json",
@@ -118,7 +167,7 @@ export async function onRequest(context) {
 <body style="background:#000;color:#f55;font-family:monospace;padding:10px;">
   <h3>GitHub Error (${apiRes.status})</h3>
   <pre style="white-space:pre-wrap;word-break:break-all;color:#aaa;">${esc(errText)}</pre>
-  <p><a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#0f0;">← Back to Repos</a></p>
+  <p><a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&action=branches" style="color:#0f0;">🌿 Switch Branch</a> | <a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#0f0;">← Repos</a></p>
 </body>
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" }, status: apiRes.status });
     }
@@ -135,15 +184,15 @@ export async function onRequest(context) {
 
     let listHtml = "";
     if (filePath) {
-      listHtml += `<li><a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(parentPath)}" style="color:#0f0;text-decoration:none;">[.. Up one level]</a></li>`;
+      listHtml += `<li><a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(parentPath)}${branchParam}" style="color:#0f0;text-decoration:none;">[.. Up one level]</a></li>`;
     }
 
     for (const item of entries) {
       if (item.type === "dir") {
-        listHtml += `<li>📁 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}" style="color:#0f0;text-decoration:none;">${esc(item.name)}/</a></li>`;
+        listHtml += `<li>📁 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}${branchParam}" style="color:#0f0;text-decoration:none;">${esc(item.name)}/</a></li>`;
       } else {
         const sizeStr = item.size ? `(${(item.size / 1024).toFixed(1)} KB)` : '';
-        listHtml += `<li>📄 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=download" style="color:#fff;">${esc(item.name)}</a> <span style="color:#666;font-size:11px;">${sizeStr}</span> <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=raw" style="color:#0f0;font-size:11px;margin-left:6px;">[view]</a></li>`;
+        listHtml += `<li>📄 <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=download${branchParam}" style="color:#fff;">${esc(item.name)}</a> <span style="color:#666;font-size:11px;">${sizeStr}</span> <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(item.path)}&action=raw${branchParam}" style="color:#0f0;font-size:11px;margin-left:6px;">[view]</a></li>`;
       }
     }
 
@@ -159,8 +208,9 @@ export async function onRequest(context) {
     <b>/${esc(repo)}${filePath ? '/' + esc(filePath) : ''}</b>
   </div>
   <div style="font-size:11px;margin-bottom:10px;">
-    <a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#888;">[Repo List]</a> &nbsp;
-    <a href="/?pin=${encodeURIComponent(pin)}" style="color:#888;">[Agent]</a> &nbsp;
+    🌿 Branch: <a href="/browse?pin=${encodeURIComponent(pin)}&repo=${encodeURIComponent(repo)}&action=branches" style="color:#ff0;text-decoration:underline;">[${esc(branch || "default")}] (Switch)</a> &nbsp;|&nbsp;
+    <a href="/browse?pin=${encodeURIComponent(pin)}" style="color:#888;">[Repo List]</a> &nbsp;|&nbsp;
+    <a href="/?pin=${encodeURIComponent(pin)}" style="color:#888;">[Agent]</a> &nbsp;|&nbsp;
     <a href="/chat?token=${encodeURIComponent(pin)}" style="color:#888;">[Chat]</a>
   </div>
   <ul style="list-style:none;padding-left:0;line-height:1.9;margin:0;font-size:13px;">${listHtml}</ul>
