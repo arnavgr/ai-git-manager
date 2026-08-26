@@ -1,51 +1,72 @@
-# ai-git-manager (or preferred name)
+# OpenClaude Live Git Agent
 
-A zero-local-compute, headless AI coding agent. 
+A headless, zero-local-compute AI coding agent for managing and refactoring GitHub repositories via a browser interface.
 
-This project allows you to dispatch complex, autonomous code refactoring tasks to any of your GitHub repositories directly from a web browser. It completely offloads the heavy LLM processing and Git operations to the cloud, making it possible to execute massive codebase changes even from aging hardware like an Intel Core 2 Duo with 2GB of RAM, or directly from a mobile device.
+The system runs [OpenClaude](https://github.com/gitlawb/openclaude) inside GitHub Actions and connects to a Cloudflare Pages dispatch bridge over Cloudflare KV. It supports multi-turn iterative editing, direct file uploads, real-time provider telemetry, and automated multi-tier provider fallbacks.
+
+---
 
 ## Architecture
 
-The system operates across a dual-tier cloud architecture:
+* **Cloudflare Pages (`[[path]].js`):** Lightweight UI and router. Handles HMAC PIN authentication, accepts prompts/files, and synchronizes state via Cloudflare KV. Polling is state-aware (polls every 3s during agent execution, pauses when waiting for user input).
+* **GitHub Actions (`agent.yml`):** Ubuntu runner executing OpenClaude with session resumption (`--resume`). Ingests uploaded files to the repo root, handles provider fallback cascades, and executes git commits/pushes.
 
-1. **The Dispatcher (Cloudflare Pages):** A lightweight HTML interface and routing function (`[[path]].js`) that securely accepts a prompt, validates an HMAC PIN, updates a live KV status database, and triggers the CI pipeline.
-2. **The Surgeon (GitHub Actions):** An `ubuntu-latest` runner equipped with 7GB of RAM that spins up [OpenClaude](https://github.com/gitlawb/openclaude). It clones the target repository, reads the codebase, autonomously writes and verifies the requested code modifications using the `gemini-3.1-flash-lite` model, and pushes the final commits back to the branch.
+---
 
-## Features
+## Model Fallback Chain
 
-* **Zero Local Overhead:** Requires no local Node.js environments, Python scripts, or Docker containers. 
-* **Suckless Philosophy:** Does one thing (autonomous codebase editing) and does it efficiently without unnecessary toolchain bloat.
-* **Live Status Tracking:** Utilizes Cloudflare KV to provide real-time updates (e.g., `⏳ Reading codebase...`) to the front-end interface.
-* **Headless Autonomy:** Bypasses interactive terminal prompts using `--dangerously-skip-permissions` to allow OpenClaude to refactor without human intervention during the run.
+If a provider exhausts its quota or returns a `429`, the runner automatically falls back to the next tier:
 
-## Setup & Deployment
+1. **Gemini 3.5 Flash** (`gemini-3.5-flash`)
+2. **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`)
+3. **Groq** (`qwen/qwen3.6-27b` with `16384` token output limiter)
+4. **OpenRouter** (`openrouter/free`)
 
-### 1. GitHub Setup
-1. Fork or clone this repository.
-2. Navigate to **Settings > Secrets and variables > Actions**.
-3. Add the following repository secrets:
-   - `CF_ACCOUNT_ID`: Your Cloudflare Account ID.
-   - `CF_API_TOKEN`: Cloudflare API Token (with KV edit permissions).
-   - `KV_NAMESPACE_ID`: The ID of your Cloudflare KV namespace.
-   - `GEMINI_API_KEY`: Your Google Gemini API Key.
-   - `GH_PAT`: A GitHub Personal Access Token (Classic) with `repo` scope to clone and push to your target repositories.
+---
 
-### 2. Cloudflare Pages Setup
-1. Create a new Cloudflare Pages project connected to this repository.
-2. Navigate to **Settings > Functions > Variables**.
-3. Add your `AUTH_PIN` (the password used on the web interface), `GH_USER`, `MANAGER_REPO`, and `GH_PAT`.
-4. Ensure you bind your KV Namespace (e.g., `AGENT_KV`) to both Production and Preview environments under the Functions bindings settings.
+## Self-Hosting Setup
 
-## Usage
+### 1. GitHub Repository Secrets
 
-1. Visit your deployed Cloudflare Pages URL.
-2. Enter your `PIN`.
-3. Specify the target `repo` (e.g., `arnavgr/target-project`) and `branch`.
-4. Provide a detailed task description in the prompt.
-5. Hit **EXECUTE**. 
+In the repository hosting your `agent.yml` workflow, navigate to **Settings > Secrets and variables > Actions** and add:
 
-The web interface will redirect to a live status page. Behind the scenes, the GitHub Action will spin up, OpenClaude will patch the files, and the updated code will be pushed directly to your specified branch.
+| Secret               | Description                                                              |
+| :------------------- | :----------------------------------------------------------------------- |
+| `CF_ACCOUNT_ID`      | Cloudflare Account ID                                                    |
+| `CF_API_TOKEN`       | Cloudflare API Token (Requires **Workers KV:Edit** permissions)          |
+| `KV_NAMESPACE_ID`    | ID of your Cloudflare KV Namespace                                       |
+| `GH_PAT`             | GitHub Personal Access Token (Classic) with `repo` and `workflow` scopes |
+| `GEMINI_API_KEY`     | Google Gemini API Key                                                    |
+| `GROQ_API_KEY`       | Groq API Key                                                             |
+| `OPENROUTER_API_KEY` | *(Optional)* OpenRouter API Key                                          |
+| `TAVILY_API_KEY`     | *(Optional)* Tavily API Key for web search capabilities                  |
+
+### 2. Cloudflare Pages Deployment
+
+1. Deploy `[[path]].js` to Cloudflare Pages (or as a Cloudflare Worker).
+2. Create a KV namespace named `AGENT_KV` and bind it to variable `AGENT_KV` under **Settings > Functions > KV namespace bindings**.
+3. Add the following Environment Variables in Cloudflare Pages (**Settings > Environment variables**):
+
+   * `AUTH_PIN`: Access PIN for the web interface.
+   * `GH_USER`: Your GitHub username.
+   * `GH_PAT`: Same GitHub Personal Access Token configured above.
+   * `MANAGER_REPO`: Repository name where `agent.yml` is stored.
+   * `MANAGER_BRANCH`: *(Optional)* Branch for the workflow dispatch (defaults to `main`).
+
+---
+
+## Runtime Commands
+
+Send these commands directly in the chat interface during an active session:
+
+* `/push` — Stages all changes (`git add .`), creates a commit, and pushes to the target branch.
+* `/exit` — Forcefully terminates the runner and ends the session.
+
+*Note: The runner automatically shuts down after 15 minutes of inactivity to prevent consuming GitHub Actions minutes.*
+
+---
 
 ## License
 
 MIT
+
