@@ -59,7 +59,6 @@ jobs:
         run: |
           node << 'EOF'
           const { spawn, spawnSync } = require('child_process');
-          const crypto = require('crypto');
           const fs = require('fs');
           const path = require('path');
 
@@ -73,29 +72,17 @@ jobs:
           };
 
           const MODEL_LABELS = {
-            'gemini-3.8': 'Gemini 3.8 Flash',
             'gemini-3.7': 'Gemini 3.7 Flash',
             'gemini-3.6': 'Gemini 3.6 Flash',
             'gemini-3.5': 'Gemini 3.5 Flash',
             'gemini-3.5-lite': 'Gemini 3.5 Flash-Lite',
+            'empero-qwen': 'Empero Qwen 3.8 (27B-FP8)',
             'gemini-3.1-lite': 'Gemini 3.1 Flash-Lite',
             'openrouter': 'OpenRouter Free',
             'groq': 'Groq (Qwen 3.6 27B)'
           };
 
-          const MODEL_STRINGS = {
-            'gemini-3.8': 'gemini-3.8-flash',
-            'gemini-3.7': 'gemini-3.7-flash',
-            'gemini-3.6': 'gemini-3.6-flash',
-            'gemini-3.5': 'gemini-3.5-flash',
-            'gemini-3.5-lite': 'gemini-3.5-flash-lite',
-            'gemini-3.1-lite': 'gemini-3.1-flash-lite',
-            'openrouter': process.env.OPENROUTER_MODEL,
-            'groq': process.env.GROQ_MODEL
-          };
-
-          const VALID_EFFORTS = ['low', 'medium', 'high', 'max'];
-
+          // Strict rate-limit/quota indicators only (excluded generic invalid_request_error)
           const RATE_LIMIT_PATTERNS = [
             /error:\s*429/i,
             /rate.?limit/i,
@@ -103,10 +90,6 @@ jobs:
             /resource_exhausted/i,
             /too many requests/i
           ];
-
-          function sameNativeFamily(a, b) {
-            return !!a && !!b && a.startsWith('gemini') && b.startsWith('gemini');
-          }
 
           async function getState() {
             try {
@@ -155,49 +138,69 @@ jobs:
             }
           }
 
-          function runAgentAsync(provider, sessionId, isNewSession, userMsg, effort, fallbackProvider) {
+          function runAgentAsync(provider, sessionId, userMsg, effort) {
             return new Promise((resolve) => {
               let env = { ...process.env };
               const args = [];
 
-              const effortLevel = VALID_EFFORTS.includes((effort || 'high').toLowerCase()) ? (effort || 'high').toLowerCase() : 'high';
+              const effortLevel = (effort || 'high').toLowerCase();
               env.CLAUDE_CODE_EFFORT = effortLevel;
 
+              // Belt-and-suspenders configuration: populate both CLI flags and environment variables
               if (provider.startsWith('gemini')) {
-                args.push('--provider', 'gemini', '--model', MODEL_STRINGS[provider]);
+                args.push('--provider', 'gemini');
                 env.CLAUDE_CODE_USE_GEMINI = "1";
-                env.GEMINI_MODEL = MODEL_STRINGS[provider];
+
+                if (provider === 'gemini-3.7') {
+                  args.push('--model', 'gemini-3.7-flash');
+                  env.GEMINI_MODEL = "gemini-3.7-flash";
+                } else if (provider === 'gemini-3.6') {
+                  args.push('--model', 'gemini-3.6-flash');
+                  env.GEMINI_MODEL = "gemini-3.6-flash";
+                } else if (provider === 'gemini-3.5') {
+                  args.push('--model', 'gemini-3.5-flash');
+                  env.GEMINI_MODEL = "gemini-3.5-flash";
+                } else if (provider === 'gemini-3.5-lite') {
+                  args.push('--model', 'gemini-3.5-flash-lite');
+                  env.GEMINI_MODEL = "gemini-3.5-flash-lite";
+                } else if (provider === 'gemini-3.1-lite') {
+                  args.push('--model', 'gemini-3.1-flash-lite');
+                  env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+                }
+              } else if (provider === 'empero-qwen') {
+                args.push('--provider', 'openai', '--model', 'Qwen/Qwen3.8-27B-FP8');
+                env.CLAUDE_CODE_USE_OPENAI = "1";
+                env.OPENAI_API_KEY = "free";
+                env.OPENAI_BASE_URL = "https://free.empero.org/v1";
+                env.OPENAI_MODEL = "Qwen/Qwen3.8-27B-FP8";
               } else if (provider === 'openrouter') {
-                args.push('--provider', 'openai', '--model', MODEL_STRINGS[provider]);
+                args.push('--provider', 'openai', '--model', process.env.OPENROUTER_MODEL);
                 env.CLAUDE_CODE_USE_OPENAI = "1";
                 env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
                 env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
-                env.OPENAI_MODEL = MODEL_STRINGS[provider];
+                env.OPENAI_MODEL = env.OPENROUTER_MODEL;
                 env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "4000";
-                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [MODEL_STRINGS[provider]]: 4000 });
+                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.OPENROUTER_MODEL]: 4000 });
               } else if (provider === 'groq') {
-                args.push('--provider', 'openai', '--model', MODEL_STRINGS[provider]);
+                args.push('--provider', 'openai', '--model', process.env.GROQ_MODEL);
                 env.CLAUDE_CODE_USE_OPENAI = "1";
                 env.OPENAI_API_KEY = env.GROQ_API_KEY;
                 env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
-                env.OPENAI_MODEL = MODEL_STRINGS[provider];
+                env.OPENAI_MODEL = process.env.GROQ_MODEL;
                 env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
-                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [MODEL_STRINGS[provider]]: 16384 });
+                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [process.env.GROQ_MODEL]: 16384 });
               }
 
-              if (isNewSession) {
-                args.push('--session-id', sessionId);
-              } else {
+              if (sessionId) {
                 args.push('--resume', sessionId);
               }
 
-              args.push('--effort', effortLevel);
-
-              if (fallbackProvider && sameNativeFamily(provider, fallbackProvider)) {
-                args.push('--fallback-model', MODEL_STRINGS[fallbackProvider]);
+              let finalPrompt = userMsg;
+              if (effortLevel !== 'none') {
+                finalPrompt = `[Reasoning Effort: ${effortLevel.toUpperCase()}]\n` + finalPrompt;
               }
 
-              args.push('-p', userMsg, '--dangerously-skip-permissions');
+              args.push('-p', finalPrompt, '--dangerously-skip-permissions');
 
               const child = spawn('openclaude', args, { env });
 
@@ -222,15 +225,17 @@ jobs:
 
               child.on('close', (code) => {
                 clearTimeout(timer);
+                const match = combinedOutput.match(/--resume\s+([a-zA-Z0-9_-]+)/);
+                const newSessionId = match ? match[1] : sessionId;
                 const isRateLimit = killedForRateLimit || RATE_LIMIT_PATTERNS.some(p => p.test(combinedOutput));
                 const isError = isRateLimit || code !== 0;
 
                 resolve({
                   success: !isError,
                   output: combinedOutput.trim() || "(No output from agent)",
+                  sessionId: newSessionId,
                   provider,
-                  isRateLimit,
-                  killedForRateLimit
+                  isRateLimit
                 });
               });
             });
@@ -298,6 +303,7 @@ jobs:
                     continue;
                   }
 
+                  // 1. Process File Attachment (Sanitized with path.basename)
                   let instruction = userMsg;
                   if (state.attachment && state.attachment.name && state.attachment.content) {
                     try {
@@ -310,12 +316,13 @@ jobs:
                     }
                   }
 
+                  // 2. Build prioritized fallback list
                   const defaultOrder = [
-                    'gemini-3.8',
                     'gemini-3.7', 
                     'gemini-3.6', 
                     'gemini-3.5', 
                     'gemini-3.5-lite', 
+                    'empero-qwen', 
                     'gemini-3.1-lite', 
                     'openrouter', 
                     'groq'
@@ -328,55 +335,27 @@ jobs:
                     candidateProviders = defaultOrder;
                   }
 
-                  let activeProvider = (state.provider && candidateProviders.includes(state.provider))
-                    ? state.provider 
-                    : candidateProviders[0];
-
-                  const activeIdx = candidateProviders.indexOf(activeProvider);
-                  const startIdx = activeIdx >= 0 ? activeIdx : 0;
-                  const nextProvider = candidateProviders[startIdx + 1] || null;
-
-                  let activeSessionId = state.session_id || crypto.randomUUID();
-                  let isNewSession = !state.session_id;
-
-                  const useNativeHandover = !!state.native_handover && sameNativeFamily(activeProvider, nextProvider);
-
+                  let activeProvider = state.provider || candidateProviders[0];
                   let failedAttempts = [];
-                  let result = await runAgentAsync(
-                    activeProvider, activeSessionId, isNewSession, instruction, effort,
-                    useNativeHandover ? nextProvider : null
-                  );
+                  let result = await runAgentAsync(activeProvider, state.session_id, instruction, effort);
 
+                  // 3. Fallback Execution Loop
                   if (!result.success) {
                     failedAttempts.push(MODEL_LABELS[activeProvider] || activeProvider);
-                    const alreadyTried = [activeProvider];
-
-                    // Only count native handover as completed if it wasn't aborted by SIGTERM
-                    if (useNativeHandover && !result.killedForRateLimit) {
-                      failedAttempts.push(MODEL_LABELS[nextProvider] || nextProvider);
-                      alreadyTried.push(nextProvider);
-                    }
-
                     for (const p of candidateProviders) {
-                      if (alreadyTried.includes(p)) continue;
+                      if (p === activeProvider) continue;
 
                       await setState({
                         ...state,
                         status: "thinking",
-                        model_info: `⚠️ Retrying with ${MODEL_LABELS[p] || p}...`
+                        model_info: `⚠️ ${MODEL_LABELS[activeProvider]} hit limit. Switching to ${MODEL_LABELS[p]}...`
                       });
 
                       const continuationMsg = result.isRateLimit
                         ? `You were interrupted by a rate limit/quota error while working on this task: "${userMsg}". Check your previous edits first and continue exactly where you left off — do not redo work you already completed.`
                         : instruction;
 
-                      // Fix: If the session was never established on disk, generate a fresh session ID
-                      if (!state.session_id) {
-                        activeSessionId = crypto.randomUUID();
-                        isNewSession = true;
-                      }
-
-                      result = await runAgentAsync(p, activeSessionId, isNewSession, continuationMsg, effort);
+                      result = await runAgentAsync(p, result.sessionId || state.session_id, continuationMsg, effort);
                       if (result.success) break;
                       failedAttempts.push(MODEL_LABELS[p] || p);
                     }
@@ -387,9 +366,11 @@ jobs:
                     finalOutput = "❌ All configured providers failed or hit quotas.\n\n" + finalOutput;
                   }
 
+                  // 4. Auto-Push Changes
                   const pushResult = pushChanges();
                   finalOutput += "\n\n---\n" + pushResult.message;
 
+                  // 5. Construct Telemetry Status String
                   let telemetryString = `Active: ${MODEL_LABELS[result.provider] || result.provider}`;
                   if (failedAttempts.length > 0) {
                     telemetryString += ` | Failed/Skipped: ${failedAttempts.join(', ')}`;
@@ -400,10 +381,9 @@ jobs:
                     last_user: userMsg, 
                     last_agent: finalOutput,
                     msg_id: lastMsgId,
-                    session_id: result.success ? activeSessionId : state.session_id,
+                    session_id: result.sessionId,
                     provider: result.success ? result.provider : state.provider,
                     provider_choice: state.provider_choice || 'auto',
-                    native_handover: !!state.native_handover,
                     effort: effort,
                     model_info: telemetryString,
                     attachment: null
