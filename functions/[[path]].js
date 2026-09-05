@@ -269,8 +269,7 @@ export async function onRequest(context) {
     const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { 
       status: "waiting", 
       last_agent: "Waiting for agent to boot...",
-      model_info: "Initializing...",
-      effort: "high"
+      model_info: "Initializing..."
     };
     
     const isThinking = state.status === "thinking" || state.status === "booting";
@@ -287,7 +286,7 @@ export async function onRequest(context) {
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
-    STATUS: ${esc((state.status || "unknown").toUpperCase())} | EFFORT: ${esc((state.effort || "HIGH").toUpperCase())}
+    STATUS: ${esc((state.status || "unknown").toUpperCase())}${state.strict_pinning ? ' [STRICT PIN]' : ''}
     &nbsp;·&nbsp;<a href="#latest" style="color:#0f0;">jump to latest ↓</a>
     &nbsp;·&nbsp;<a href="/browse?pin=${encodeURIComponent(token)}" style="color:#888;">[Browse Repos]</a>
   </div>
@@ -322,7 +321,7 @@ export async function onRequest(context) {
   }
 
   // =========================================================================
-  // POST / — Dispatch the GitHub Action with Provider Choice, Effort & File
+  // POST / — Dispatch the GitHub Action with Provider Choice, Pinning & File
   // =========================================================================
   if (request.method === "POST" && url.pathname === "/") {
     const data = await request.formData();
@@ -333,7 +332,7 @@ export async function onRequest(context) {
     const repo = String(data.get("repo") || "");
     const branch = String(data.get("branch") || "main");
     const providerChoice = String(data.get("provider") || "auto");
-    const effortChoice = String(data.get("effort") || "high");
+    const strictPinning = data.get("strict_pinning") === "1";
 
     const file = data.get("file");
     let attachment = null;
@@ -355,8 +354,8 @@ export async function onRequest(context) {
       msg_id: 1,
       attachment: attachment,
       provider_choice: providerChoice,
-      effort: effortChoice,
-      model_info: `Selected: ${providerChoice.toUpperCase()} [Effort: ${effortChoice.toUpperCase()}] (Starting...)`,
+      strict_pinning: strictPinning,
+      model_info: `Selected: ${providerChoice.toUpperCase()}${strictPinning ? ' [STRICT PIN]' : ''} (Starting...)`,
       session_id: null,
       provider: null
     }));
@@ -406,26 +405,25 @@ export async function onRequest(context) {
     <input type="text" name="branch" value="main" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
     
     <label style="color:#aaa;font-size:11px;">Primary Provider / Fallback Mode:</label>
-    <select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
-      <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> OpenRouter -> Groq)</option>
+    <select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:8px;box-sizing:border-box;">
+      <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> NIM DeepSeek V4 -> NIM Kimi K3 -> OpenRouter -> Groq 3.8 -> Groq 3.6)</option>
       <option value="gemini-3.8">Gemini 3.8 Flash</option>
       <option value="gemini-3.7">Gemini 3.7 Flash</option>
       <option value="gemini-3.6">Gemini 3.6 Flash</option>
       <option value="gemini-3.5">Gemini 3.5 Flash</option>
       <option value="gemini-3.5-lite">Gemini 3.5 Flash Lite</option>
       <option value="gemini-3.1-lite">Gemini 3.1 Flash Lite</option>
+      <option value="nim-deepseek-v4">NVIDIA NIM (DeepSeek V4 Flash)</option>
+      <option value="nim-kimi-k3">NVIDIA NIM (Kimi K3)</option>
       <option value="openrouter">OpenRouter Free</option>
-      <option value="groq">Groq (Qwen 3.6 27B)</option>
+      <option value="groq">Groq (Qwen 3.8 27B)</option>
+      <option value="groq-3.6">Groq (Qwen 3.6 27B)</option>
     </select>
 
-    <label style="color:#aaa;font-size:11px;">Reasoning Effort Level:</label>
-    <select name="effort" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
-      <option value="max">Max (Deepest Reasoning)</option>
-      <option value="high" selected>High</option>
-      <option value="medium">Medium</option>
-      <option value="low">Low</option>
-      <option value="none">None (Direct Execution)</option>
-    </select>
+    <label style="color:#aaa;font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+      <input type="checkbox" name="strict_pinning" value="1" style="width:16px;height:16px;">
+      Strict Model Pinning (Disable fallback; fail immediately if selected model hits rate limits or errors)
+    </label>
 
     <label style="color:#aaa;font-size:11px;">Initial Prompt:</label>
     <textarea name="prompt" rows="3" placeholder="Initial prompt..." style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;" required></textarea>
