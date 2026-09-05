@@ -46,254 +46,537 @@ jobs:
             git checkout -b "$TARGET_BRANCH"
           fi
 
-      - name: Setup Node & Install OpenClaude
+      - name: Setup Node
         uses: actions/setup-node@v5
         with:
           node-version: 22
 
-      - name: Install OpenClaude
-        run: npm install -g @gitlawb/openclaude
-
-      - name: Run Live Chat Bridge
+      - name: Run Native Agent Bridge
         working-directory: ./target
         run: |
           node << 'EOF'
-          const { spawn, spawnSync } = require('child_process');
-          const crypto = require('crypto');
           const fs = require('fs');
           const path = require('path');
+          const { execSync, spawnSync } = require('child_process');
 
           const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
           const CF_API_TOKEN = process.env.CF_API_TOKEN;
           const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
           const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
-          const HEADERS = { 
-            "Authorization": `Bearer ${CF_API_TOKEN}`, 
-            "Content-Type": "application/json" 
+          const HEADERS = {
+            "Authorization": `Bearer ${CF_API_TOKEN}`,
+            "Content-Type": "application/json"
           };
 
-          const MODEL_LABELS = {
-            'gemini-3.8': 'Gemini 3.8 Flash',
-            'gemini-3.7': 'Gemini 3.7 Flash',
-            'gemini-3.6': 'Gemini 3.6 Flash',
-            'gemini-3.5': 'Gemini 3.5 Flash',
-            'gemini-3.5-lite': 'Gemini 3.5 Flash-Lite',
-            'gemini-3.1-lite': 'Gemini 3.1 Flash-Lite',
-            'openrouter': 'OpenRouter Free',
-            'groq': 'Groq (Qwen 3.6 27B)'
+          const PROVIDERS = {
+            'gemini-3.8': {
+              label: 'Gemini 3.8 Flash',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.8-flash',
+              key: process.env.GEMINI_API_KEY
+            },
+            'gemini-3.7': {
+              label: 'Gemini 3.7 Flash',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.7-flash',
+              key: process.env.GEMINI_API_KEY
+            },
+            'gemini-3.6': {
+              label: 'Gemini 3.6 Flash',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.6-flash',
+              key: process.env.GEMINI_API_KEY
+            },
+            'gemini-3.5': {
+              label: 'Gemini 3.5 Flash',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.5-flash',
+              key: process.env.GEMINI_API_KEY
+            },
+            'gemini-3.5-lite': {
+              label: 'Gemini 3.5 Flash-Lite',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.5-flash-lite',
+              key: process.env.GEMINI_API_KEY
+            },
+            'gemini-3.1-lite': {
+              label: 'Gemini 3.1 Flash-Lite',
+              url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+              model: 'gemini-3.1-flash-lite',
+              key: process.env.GEMINI_API_KEY
+            },
+            'openrouter': {
+              label: 'OpenRouter Free',
+              url: 'https://openrouter.ai/api/v1/chat/completions',
+              model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+              key: process.env.OPENROUTER_API_KEY,
+              maxTokens: 4000,
+              extraHeaders: { 'HTTP-Referer': 'https://github.com', 'X-Title': 'CloudPhone-Agent' }
+            },
+            'groq': {
+              label: 'Groq (Qwen 3.6 27B)',
+              url: 'https://api.groq.com/openai/v1/chat/completions',
+              model: process.env.GROQ_MODEL || 'qwen/qwen3.6-27b',
+              key: process.env.GROQ_API_KEY,
+              maxTokens: 16384
+            }
           };
 
-          const MODEL_STRINGS = {
-            'gemini-3.8': 'gemini-3.8-flash',
-            'gemini-3.7': 'gemini-3.7-flash',
-            'gemini-3.6': 'gemini-3.6-flash',
-            'gemini-3.5': 'gemini-3.5-flash',
-            'gemini-3.5-lite': 'gemini-3.5-flash-lite',
-            'gemini-3.1-lite': 'gemini-3.1-flash-lite',
-            'openrouter': process.env.OPENROUTER_MODEL,
-            'groq': process.env.GROQ_MODEL
-          };
-
-          const VALID_EFFORTS = ['low', 'medium', 'high', 'max'];
+          const DEFAULT_ORDER = [
+            'gemini-3.8', 'gemini-3.7', 'gemini-3.6', 'gemini-3.5', 'gemini-3.5-lite',
+            'gemini-3.1-lite', 'openrouter', 'groq'
+          ];
 
           const RATE_LIMIT_PATTERNS = [
             /error:\s*429/i,
+            /\b429\b/,
             /rate.?limit/i,
-            /quota exceeded/i,
-            /resource_exhausted/i,
-            /too many requests/i
+            /rate_limit/i,
+            /quota/i,
+            /resource.?exhausted/i,
+            /too many requests/i,
+            /overloaded/i
           ];
 
-          function sameNativeFamily(a, b) {
-            return !!a && !!b && a.startsWith('gemini') && b.startsWith('gemini');
+          class RateLimitError extends Error {}
+          class ProviderError extends Error {}
+
+          function isRateLimitText(text) {
+            return RATE_LIMIT_PATTERNS.some(p => p.test(String(text)));
           }
+
+          const TOOLS = [
+            {
+              type: 'function',
+              function: {
+                name: 'read_file',
+                description: 'Read the contents of a file from the workspace. Path is relative to the repository root.',
+                parameters: {
+                  type: 'object',
+                  properties: { path: { type: 'string', description: 'Relative path of the file to read' } },
+                  required: ['path']
+                }
+              }
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'write_file',
+                description: 'Create or overwrite a file in the workspace. Parent directories are created automatically. Path is relative to the repository root.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    path: { type: 'string', description: 'Relative path of the file to write' },
+                    content: { type: 'string', description: 'Full content to write into the file' }
+                  },
+                  required: ['path', 'content']
+                }
+              }
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'list_dir',
+                description: 'List the files and folders in a directory. Use "." for the repository root.',
+                parameters: {
+                  type: 'object',
+                  properties: { path: { type: 'string', description: 'Relative directory path to list' } },
+                  required: ['path']
+                }
+              }
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'run_command',
+                description: 'Run a non-interactive bash command in the repository root. 30 second timeout. Use for git, builds, tests, grep, etc.',
+                parameters: {
+                  type: 'object',
+                  properties: { command: { type: 'string', description: 'The bash command to execute' } },
+                  required: ['command']
+                }
+              }
+            }
+          ];
 
           async function getState() {
             try {
               const res = await fetch(KV_URL, { headers: HEADERS });
               if (!res.ok) return null;
               return await res.json();
-            } catch (e) {
-              return null;
-            }
+            } catch (e) { return null; }
           }
 
           async function setState(data) {
             try {
-              await fetch(KV_URL, { 
-                method: 'PUT', 
-                headers: HEADERS, 
-                body: JSON.stringify(data) 
-              });
-            } catch (e) {
-              console.error("Failed to update KV state:", e);
-            }
+              await fetch(KV_URL, { method: 'PUT', headers: HEADERS, body: JSON.stringify(data) });
+            } catch (e) { console.error('Failed to update KV state:', e); }
+          }
+
+          let isActiveTurn = false;
+
+          function flushThinkingKV(text) {
+            if (!isActiveTurn) return;
+            (async () => {
+              try {
+                if (!isActiveTurn) return;
+                const s = await getState() || {};
+                await setState({ ...s, status: 'thinking', last_agent: text });
+              } catch (e) {}
+            })();
+          }
+
+          function flushSwitchKV(info) {
+            if (!isActiveTurn) return;
+            (async () => {
+              try {
+                if (!isActiveTurn) return;
+                const s = await getState() || {};
+                await setState({ ...s, status: 'thinking', model_info: info, last_agent: info });
+              } catch (e) {}
+            })();
           }
 
           function pushChanges() {
             try {
               const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
               if (!status.stdout || !status.stdout.trim()) {
-                return { success: true, message: "ℹ️ No code changes detected to push." };
+                return { success: true, message: 'ℹ️ No code changes detected to push.' };
               }
-
               spawnSync('git', ['add', '.'], { stdio: 'inherit' });
-
               const commit = spawnSync('git', ['commit', '-m', 'Live chat agent update'], { encoding: 'utf8' });
               if (commit.status !== 0) {
-                return { success: false, message: "❌ Commit failed: " + (commit.stderr || commit.stdout || "unknown error").trim() };
+                return { success: false, message: '❌ Commit failed: ' + (commit.stderr || commit.stdout || 'unknown error').trim() };
               }
-
               const push = spawnSync('git', ['push', 'origin', 'HEAD'], { encoding: 'utf8' });
               if (push.status !== 0) {
-                return { success: false, message: "❌ Push failed: " + (push.stderr || push.stdout || "unknown error").trim() };
+                return { success: false, message: '❌ Push failed: ' + (push.stderr || push.stdout || 'unknown error').trim() };
               }
-
-              return { success: true, message: "✅ Changes committed and pushed to remote." };
+              return { success: true, message: '✅ Changes committed and pushed to remote.' };
             } catch (e) {
-              return { success: false, message: "❌ Push error: " + e.message };
+              return { success: false, message: '❌ Push error: ' + e.message };
             }
           }
 
-          function runAgentAsync(provider, sessionId, isNewSession, userMsg, effort, fallbackProvider) {
-            return new Promise((resolve) => {
-              let env = { ...process.env };
-              const args = [];
+          function safeResolve(rel) {
+            const cwd = process.cwd();
+            const resolved = path.resolve(cwd, rel || '.');
+            if (resolved !== cwd && !resolved.startsWith(cwd + path.sep)) {
+              throw new Error('Path escapes the workspace: ' + rel);
+            }
+            return resolved;
+          }
 
-              const effortLevel = VALID_EFFORTS.includes((effort || 'high').toLowerCase()) ? (effort || 'high').toLowerCase() : 'high';
-              env.CLAUDE_CODE_EFFORT = effortLevel;
+          function truncate(s, max) {
+            s = String(s);
+            if (s.length <= max) return s;
+            return s.slice(0, max) + '\n... [truncated ' + (s.length - max) + ' chars]';
+          }
 
-              if (provider.startsWith('gemini')) {
-                args.push('--provider', 'gemini', '--model', MODEL_STRINGS[provider]);
-                env.CLAUDE_CODE_USE_GEMINI = "1";
-                env.GEMINI_MODEL = MODEL_STRINGS[provider];
-              } else if (provider === 'openrouter') {
-                args.push('--provider', 'openai', '--model', MODEL_STRINGS[provider]);
-                env.CLAUDE_CODE_USE_OPENAI = "1";
-                env.OPENAI_API_KEY = env.OPENROUTER_API_KEY;
-                env.OPENAI_BASE_URL = "https://openrouter.ai/api/v1";
-                env.OPENAI_MODEL = MODEL_STRINGS[provider];
-                env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "4000";
-                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [MODEL_STRINGS[provider]]: 4000 });
-              } else if (provider === 'groq') {
-                args.push('--provider', 'openai', '--model', MODEL_STRINGS[provider]);
-                env.CLAUDE_CODE_USE_OPENAI = "1";
-                env.OPENAI_API_KEY = env.GROQ_API_KEY;
-                env.OPENAI_BASE_URL = "https://api.groq.com/openai/v1";
-                env.OPENAI_MODEL = MODEL_STRINGS[provider];
-                env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16384";
-                env.CLAUDE_CODE_OPENAI_MAX_OUTPUT_TOKENS = JSON.stringify({ [MODEL_STRINGS[provider]]: 16384 });
+          function executeTool(name, args) {
+            try {
+              switch (name) {
+                case 'read_file': {
+                  const p = safeResolve(args.path);
+                  return fs.readFileSync(p, 'utf8');
+                }
+                case 'write_file': {
+                  const p = safeResolve(args.path);
+                  fs.mkdirSync(path.dirname(p), { recursive: true });
+                  const content = String(args.content || '');
+                  fs.writeFileSync(p, content, 'utf8');
+                  return `Successfully wrote ${content.length} characters to ${args.path}`;
+                }
+                case 'list_dir': {
+                  const p = safeResolve(args.path || '.');
+                  const entries = fs.readdirSync(p, { withFileTypes: true });
+                  const lines = entries.map(e => e.isDirectory() ? e.name + '/' : e.name);
+                  return lines.length ? lines.join('\n') : '(empty directory)';
+                }
+                case 'run_command': {
+                  const command = String(args.command || '').trim();
+                  if (!command) return 'Error: no command provided.';
+                  try {
+                    const out = execSync(command, {
+                      encoding: 'utf8', timeout: 30000,
+                      maxBuffer: 5 * 1024 * 1024, cwd: process.cwd(), shell: '/bin/bash'
+                    });
+                    return (out && out.trim()) ? out : '(command completed with no output)';
+                  } catch (e) {
+                    let detail = '';
+                    if (e.stdout) detail += 'STDOUT:\n' + e.stdout + '\n';
+                    if (e.stderr) detail += 'STDERR:\n' + e.stderr + '\n';
+                    const timedOut = e.killed ? ' (timed out after 30s)' : '';
+                    return `Command exited with an error${timedOut}:\n${detail || e.message}`;
+                  }
+                }
+                default:
+                  return 'Unknown tool: ' + name;
               }
+            } catch (e) {
+              return 'Tool error: ' + e.message;
+            }
+          }
 
-              if (isNewSession) {
-                args.push('--session-id', sessionId);
-              } else {
-                args.push('--resume', sessionId);
+          function buildSystemPrompt() {
+            return [
+              'You are an autonomous software engineering agent working inside a cloned Git repository (the "workspace").',
+              'Your current working directory is the repository root.',
+              '',
+              'You accomplish tasks by calling the provided tools:',
+              '- read_file: read a file from the workspace (path relative to repo root).',
+              '- write_file: create or overwrite a file (parent directories are created automatically).',
+              '- list_dir: list files and folders in a directory (use "." for the repo root).',
+              '- run_command: run a non-interactive shell command (30 second timeout) for git, builds, tests, search, etc.',
+              '',
+              'Guidelines:',
+              '1. Explore the codebase first (list_dir / read_file) before making changes.',
+              '2. Make focused, correct edits. Prefer editing existing files unless asked otherwise.',
+              '3. Use run_command to verify your work when appropriate (tests, linters, builds).',
+              '4. Never run interactive or never-terminating commands.',
+              '5. Keep calling tools across turns until the task is truly complete.',
+              '6. When finished, reply with a concise plain-text summary of what you changed and STOP calling tools.',
+              '',
+              'Your final answer must be plain text with no tool calls.'
+            ].join('\n');
+          }
+
+          async function streamChatCompletion(provider, messages, onFlush) {
+            let streamBuffer = '';
+            let lastFlushedLen = -1;
+            const flushTimer = (typeof onFlush === 'function') ? setInterval(() => {
+              if (streamBuffer.length > 0 && streamBuffer.length !== lastFlushedLen) {
+                lastFlushedLen = streamBuffer.length;
+                try { onFlush(streamBuffer); } catch (e) {}
               }
+            }, 2500) : null;
 
-              args.push('--effort', effortLevel);
+            const bodyObj = { model: provider.model, messages: messages, tools: TOOLS, stream: true };
+            if (provider.maxTokens) bodyObj.max_tokens = provider.maxTokens;
 
-              if (fallbackProvider && sameNativeFamily(provider, fallbackProvider)) {
-                args.push('--fallback-model', MODEL_STRINGS[fallbackProvider]);
+            let res;
+            try {
+              res = await fetch(provider.url, {
+                method: 'POST',
+                signal: AbortSignal.timeout(600000),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${provider.key}`,
+                  ...(provider.extraHeaders || {})
+                },
+                body: JSON.stringify(bodyObj)
+              });
+            } catch (netErr) {
+              if (flushTimer) clearInterval(flushTimer);
+              throw new ProviderError(`Network error reaching ${provider.label}: ${netErr.message}`);
+            }
+
+            if (res.status === 429) {
+              if (flushTimer) clearInterval(flushTimer);
+              throw new RateLimitError(`HTTP 429 (rate limit) from ${provider.label}`);
+            }
+            if (!res.ok) {
+              let errText = '';
+              try { errText = await res.text(); } catch (e) {}
+              if (flushTimer) clearInterval(flushTimer);
+              if (isRateLimitText(errText) || isRateLimitText(String(res.status))) {
+                throw new RateLimitError(`Quota/rate-limit error from ${provider.label} (HTTP ${res.status})`);
               }
+              throw new ProviderError(`HTTP ${res.status} from ${provider.label}: ${String(errText).slice(0, 400)}`);
+            }
 
-              args.push('-p', userMsg, '--dangerously-skip-permissions');
+            let contentAcc = '';
+            const toolCallsAcc = {};
+            let finishReason = null;
 
-              const child = spawn('openclaude', args, { env });
-
-              let combinedOutput = "";
-              let killedForRateLimit = false;
-
-              const timer = setTimeout(() => {
-                child.kill('SIGTERM');
-              }, 900000); // 15 min ceiling per attempt
-
-              function onChunk(buf) {
-                const chunk = buf.toString();
-                combinedOutput += chunk;
-                if (!killedForRateLimit && RATE_LIMIT_PATTERNS.some(p => p.test(chunk))) {
-                  killedForRateLimit = true;
-                  child.kill('SIGTERM');
+            function handleLine(rawLine) {
+              const line = rawLine.trim();
+              if (!line.startsWith('data:')) return;
+              const payload = line.slice(5).trim();
+              if (!payload || payload === '[DONE]') return;
+              let json;
+              try { json = JSON.parse(payload); } catch (e) { return; }
+              const choice = (json.choices && json.choices[0]) || null;
+              if (!choice) return;
+              if (choice.finish_reason) finishReason = choice.finish_reason;
+              const delta = choice.delta || {};
+              if (typeof delta.content === 'string' && delta.content.length) {
+                contentAcc += delta.content;
+                streamBuffer += delta.content;
+              }
+              if (Array.isArray(delta.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                  const idx = (tc && tc.index !== undefined && tc.index !== null) ? tc.index : 0;
+                  if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { id: '', name: '', arguments: '' };
+                  if (tc.id) toolCallsAcc[idx].id = tc.id;
+                  if (tc.function && tc.function.name) toolCallsAcc[idx].name += tc.function.name;
+                  if (tc.function && typeof tc.function.arguments === 'string') {
+                    toolCallsAcc[idx].arguments += tc.function.arguments;
+                  }
                 }
               }
+            }
 
-              child.stdout.on('data', onChunk);
-              child.stderr.on('data', onChunk);
+            try {
+              const reader = res.body.getReader();
+              const decoder = new TextDecoder('utf8');
+              let buffer = '';
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const ln of lines) handleLine(ln);
+              }
+              buffer += decoder.decode();
+              if (buffer.trim()) {
+                for (const ln of buffer.split('\n')) handleLine(ln);
+              }
+            } catch (streamErr) {
+              if (flushTimer) clearInterval(flushTimer);
+              if (isRateLimitText(streamErr && streamErr.message)) {
+                throw new RateLimitError(`Mid-stream rate limit from ${provider.label}: ${streamErr.message}`);
+              }
+              throw new ProviderError(`Mid-stream failure from ${provider.label}: ${streamErr && streamErr.message}`);
+            }
 
-              child.on('close', (code) => {
-                clearTimeout(timer);
-                const isRateLimit = killedForRateLimit || RATE_LIMIT_PATTERNS.some(p => p.test(combinedOutput));
-                const isError = isRateLimit || code !== 0;
+            if (flushTimer) clearInterval(flushTimer);
 
-                resolve({
-                  success: !isError,
-                  output: combinedOutput.trim() || "(No output from agent)",
-                  provider,
-                  isRateLimit,
-                  killedForRateLimit
-                });
-              });
-            });
+            const toolCallsList = Object.keys(toolCallsAcc)
+              .map(k => parseInt(k, 10))
+              .sort((a, b) => a - b)
+              .map(k => ({
+                id: toolCallsAcc[k].id || ('call_' + k + '_' + Date.now()),
+                type: 'function',
+                function: { name: toolCallsAcc[k].name, arguments: toolCallsAcc[k].arguments }
+              }));
+
+            const assistantMsg = { role: 'assistant' };
+            if (contentAcc) assistantMsg.content = contentAcc;
+            else if (toolCallsList.length === 0) assistantMsg.content = '';
+            if (toolCallsList.length > 0) assistantMsg.tool_calls = toolCallsList;
+
+            return { message: assistantMsg, finishReason, content: contentAcc, toolCalls: toolCallsList };
+          }
+
+          async function callLLMWithFailover(messages, candidateKeys, startIdx, onFlush, onSwitch) {
+            const failed = [];
+            for (let i = startIdx; i < candidateKeys.length; i++) {
+              const key = candidateKeys[i];
+              const provider = PROVIDERS[key];
+              if (!provider || !provider.key) { failed.push(provider ? provider.label : key); continue; }
+              try {
+                const response = await streamChatCompletion(provider, messages, onFlush);
+                return { response, usedIdx: i, failed };
+              } catch (e) {
+                if (e instanceof RateLimitError || e instanceof ProviderError) {
+                  failed.push(provider.label);
+                  const next = candidateKeys[i + 1];
+                  if (onSwitch) {
+                    onSwitch(`⚠️ ${provider.label} failed (${e.message}). ${next ? 'Switching to ' + PROVIDERS[next].label + '...' : 'No more providers.'}`);
+                  }
+                  continue;
+                }
+                throw e;
+              }
+            }
+            const err = new Error('All providers failed: ' + failed.join(', '));
+            err.allFailed = failed;
+            throw err;
+          }
+
+          const MAX_TOOL_TURNS = 40;
+          async function runAgentTurn(messages, candidateKeys, onFlush, onSwitch) {
+            let providerIdx = 0;
+            const allFailed = [];
+            let lastUsedKey = candidateKeys[0];
+
+            for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+              const { response, usedIdx, failed } =
+                await callLLMWithFailover(messages, candidateKeys, providerIdx, onFlush, onSwitch);
+              allFailed.push(...failed);
+              providerIdx = usedIdx;
+              lastUsedKey = candidateKeys[usedIdx];
+
+              const assistantMsg = response.message;
+              messages.push(assistantMsg);
+
+              if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
+                for (const tc of assistantMsg.tool_calls) {
+                  let args = {};
+                  try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) { args = {}; }
+                  
+                  if (typeof onFlush === 'function') {
+                    onFlush(`🔧 Running tool: ${tc.function.name}...`);
+                  }
+
+                  let toolResult;
+                  try { toolResult = executeTool(tc.function.name, args); }
+                  catch (e) { toolResult = 'Tool execution error: ' + e.message; }
+                  messages.push({ role: 'tool', tool_call_id: tc.id, content: truncate(toolResult, 8000) });
+                }
+                continue;
+              } else {
+                return {
+                  finalText: assistantMsg.content || '(The agent produced no final output.)',
+                  failedProviders: allFailed,
+                  providerKey: lastUsedKey
+                };
+              }
+            }
+            return {
+              finalText: '⚠️ Reached the maximum number of tool-calling turns (' + MAX_TOOL_TURNS + '). Stopping to avoid an infinite loop.',
+              failedProviders: allFailed,
+              providerKey: lastUsedKey
+            };
           }
 
           spawnSync('git', ['config', 'user.name', 'OpenClaude Agent'], { stdio: 'inherit' });
           spawnSync('git', ['config', 'user.email', 'agent@arnavgr.com'], { stdio: 'inherit' });
+
+          let conversation = null;
 
           async function loop() {
             let lastMsgId = 0;
             let lastActivityTime = Date.now();
             const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
-            while(true) {
+            while (true) {
+              let state = null;
               try {
-                const state = await getState();
+                state = await getState();
 
                 if (state && Number(state.msg_id) > lastMsgId) {
                   lastMsgId = Number(state.msg_id);
-                  const userMsg = String(state.last_user || "").trim();
-                  const effort = String(state.effort || "high");
+                  lastActivityTime = Date.now();
+                  const userMsg = String(state.last_user || '').trim();
+                  const effort = String(state.effort || 'high').toLowerCase();
 
-                  await setState({ ...state, status: "thinking" });
+                  isActiveTurn = true;
+                  await setState({ ...state, status: 'thinking' });
 
                   if (userMsg === '/exit') {
-                    await setState({ 
-                      ...state, 
-                      status: "exited", 
-                      model_info: "Session terminated.",
-                      last_agent: "Runner terminated by user.",
-                      attachment: null 
-                    });
+                    isActiveTurn = false;
+                    await setState({ ...state, status: 'exited', model_info: 'Session terminated.', last_agent: 'Runner terminated by user.', attachment: null });
                     process.exit(0);
-                  }
-                  else if (userMsg === '/push') {
+                  } else if (userMsg === '/push') {
+                    isActiveTurn = false;
                     const pushResult = pushChanges();
-                    await setState({ 
-                      ...state, 
-                      status: "waiting", 
-                      last_agent: pushResult.message,
-                      attachment: null 
-                    });
+                    await setState({ ...state, status: 'waiting', last_agent: pushResult.message, attachment: null });
                     lastActivityTime = Date.now();
                     continue;
-                  }
-                  else if (userMsg === '/revert') {
+                  } else if (userMsg === '/revert') {
+                    isActiveTurn = false;
                     const revert = spawnSync('git', ['revert', '--no-edit', 'HEAD'], { encoding: 'utf8' });
+                    let msg;
                     if (revert.status !== 0) {
-                      await setState({ 
-                        ...state, 
-                        status: "waiting", 
-                        last_agent: "❌ Revert failed: " + (revert.stderr || revert.stdout || "unknown error").trim(),
-                        attachment: null 
-                      });
+                      msg = '❌ Revert failed: ' + (revert.stderr || revert.stdout || 'unknown error').trim();
                     } else {
                       const pushResult = pushChanges();
-                      await setState({ 
-                        ...state, 
-                        status: "waiting", 
-                        last_agent: "↩️ Reverted the last commit.\n" + pushResult.message,
-                        attachment: null 
-                      });
+                      msg = '↩️ Reverted the last commit.\n' + pushResult.message;
                     }
+                    await setState({ ...state, status: 'waiting', last_agent: msg, attachment: null });
                     lastActivityTime = Date.now();
                     continue;
                   }
@@ -305,131 +588,67 @@ jobs:
                       const targetFilePath = path.join(process.cwd(), safeFileName);
                       fs.writeFileSync(targetFilePath, state.attachment.content, 'utf8');
                       instruction = `[System Notice: The user uploaded file '${safeFileName}', which has been written to the repo root directory.]\n\n` + userMsg;
-                    } catch (e) {
-                      console.error("Failed to write attachment:", e);
-                    }
+                    } catch (e) { console.error('Failed to write attachment:', e); }
                   }
 
-                  const defaultOrder = [
-                    'gemini-3.8',
-                    'gemini-3.7', 
-                    'gemini-3.6', 
-                    'gemini-3.5', 
-                    'gemini-3.5-lite', 
-                    'gemini-3.1-lite', 
-                    'openrouter', 
-                    'groq'
-                  ];
-
-                  let candidateProviders = [];
-                  if (state.provider_choice && state.provider_choice !== 'auto' && defaultOrder.includes(state.provider_choice)) {
-                    candidateProviders = [state.provider_choice, ...defaultOrder.filter(p => p !== state.provider_choice)];
+                  let candidateKeys;
+                  if (state.provider_choice && state.provider_choice !== 'auto' && DEFAULT_ORDER.includes(state.provider_choice)) {
+                    candidateKeys = [state.provider_choice, ...DEFAULT_ORDER.filter(p => p !== state.provider_choice)];
                   } else {
-                    candidateProviders = defaultOrder;
+                    candidateKeys = DEFAULT_ORDER.slice();
                   }
 
-                  let activeProvider = (state.provider && candidateProviders.includes(state.provider))
-                    ? state.provider 
-                    : candidateProviders[0];
-
-                  const activeIdx = candidateProviders.indexOf(activeProvider);
-                  const startIdx = activeIdx >= 0 ? activeIdx : 0;
-                  const nextProvider = candidateProviders[startIdx + 1] || null;
-
-                  let activeSessionId = state.session_id || crypto.randomUUID();
-                  let isNewSession = !state.session_id;
-
-                  const useNativeHandover = !!state.native_handover && sameNativeFamily(activeProvider, nextProvider);
-
-                  let failedAttempts = [];
-                  let result = await runAgentAsync(
-                    activeProvider, activeSessionId, isNewSession, instruction, effort,
-                    useNativeHandover ? nextProvider : null
-                  );
-
-                  if (!result.success) {
-                    failedAttempts.push(MODEL_LABELS[activeProvider] || activeProvider);
-                    const alreadyTried = [activeProvider];
-
-                    // Only count native handover as completed if it wasn't aborted by SIGTERM
-                    if (useNativeHandover && !result.killedForRateLimit) {
-                      failedAttempts.push(MODEL_LABELS[nextProvider] || nextProvider);
-                      alreadyTried.push(nextProvider);
-                    }
-
-                    for (const p of candidateProviders) {
-                      if (alreadyTried.includes(p)) continue;
-
-                      await setState({
-                        ...state,
-                        status: "thinking",
-                        model_info: `⚠️ Retrying with ${MODEL_LABELS[p] || p}...`
-                      });
-
-                      const continuationMsg = result.isRateLimit
-                        ? `You were interrupted by a rate limit/quota error while working on this task: "${userMsg}". Check your previous edits first and continue exactly where you left off — do not redo work you already completed.`
-                        : instruction;
-
-                      // Fix: If the session was never established on disk, generate a fresh session ID
-                      if (!state.session_id) {
-                        activeSessionId = crypto.randomUUID();
-                        isNewSession = true;
-                      }
-
-                      result = await runAgentAsync(p, activeSessionId, isNewSession, continuationMsg, effort);
-                      if (result.success) break;
-                      failedAttempts.push(MODEL_LABELS[p] || p);
-                    }
+                  if (!conversation) {
+                    conversation = [{ role: 'system', content: buildSystemPrompt() }];
                   }
+                  const userContent = (effort !== 'none' ? `[Reasoning Effort: ${effort.toUpperCase()}]\n` : '') + instruction;
+                  conversation.push({ role: 'user', content: userContent });
 
-                  let finalOutput = result.output;
-                  if (!result.success) {
-                    finalOutput = "❌ All configured providers failed or hit quotas.\n\n" + finalOutput;
+                  let finalOutput;
+                  let telemetryString;
+                  try {
+                    const result = await runAgentTurn(conversation, candidateKeys, flushThinkingKV, flushSwitchKV);
+                    finalOutput = result.finalText;
+                    const activeLabel = PROVIDERS[result.providerKey] ? PROVIDERS[result.providerKey].label : result.providerKey;
+                    telemetryString = `Active: ${activeLabel}`;
+                    if (result.failedProviders.length > 0) {
+                      telemetryString += ` | Failed/Skipped: ${result.failedProviders.join(', ')}`;
+                    }
+                  } catch (e) {
+                    finalOutput = '❌ All configured providers failed or hit quotas.\n\n' + e.message;
+                    telemetryString = 'All providers failed';
                   }
 
                   const pushResult = pushChanges();
-                  finalOutput += "\n\n---\n" + pushResult.message;
+                  finalOutput += '\n\n---\n' + pushResult.message;
 
-                  let telemetryString = `Active: ${MODEL_LABELS[result.provider] || result.provider}`;
-                  if (failedAttempts.length > 0) {
-                    telemetryString += ` | Failed/Skipped: ${failedAttempts.join(', ')}`;
-                  }
-
-                  await setState({ 
-                    status: "waiting", 
-                    last_user: userMsg, 
+                  isActiveTurn = false;
+                  await setState({
+                    status: 'waiting',
+                    last_user: userMsg,
                     last_agent: finalOutput,
                     msg_id: lastMsgId,
-                    session_id: result.success ? activeSessionId : state.session_id,
-                    provider: result.success ? result.provider : state.provider,
+                    session_id: null,
+                    provider: null,
                     provider_choice: state.provider_choice || 'auto',
-                    native_handover: !!state.native_handover,
                     effort: effort,
                     model_info: telemetryString,
                     attachment: null
                   });
-
                   lastActivityTime = Date.now();
                 }
 
                 if (Date.now() - lastActivityTime > IDLE_TIMEOUT_MS) {
-                  await setState({ 
-                    ...(state || {}), 
-                    status: "exited", 
-                    model_info: "Session expired (Inactivity)",
-                    last_agent: "⏱️ Runner terminated automatically due to 30 minutes of inactivity." 
-                  });
+                  isActiveTurn = false;
+                  await setState({ ...(state || {}), status: 'exited', model_info: 'Session expired (Inactivity)', last_agent: '⏱️ Runner terminated automatically due to 30 minutes of inactivity.' });
                   process.exit(0);
                 }
-
               } catch (err) {
-                console.error("Bridge runtime error:", err);
+                console.error('Bridge runtime error:', err);
               }
-
               await new Promise(r => setTimeout(r, 3000));
             }
           }
-
           loop();
           EOF
 
@@ -442,7 +661,6 @@ jobs:
           const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID;
           const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_NAMESPACE_ID}/values/chat_state`;
           const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
-
           async function finalize() {
             try {
               const res = await fetch(KV_URL, { headers: HEADERS });

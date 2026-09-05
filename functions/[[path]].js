@@ -333,7 +333,6 @@ export async function onRequest(context) {
     const repo = String(data.get("repo") || "");
     const branch = String(data.get("branch") || "main");
     const providerChoice = String(data.get("provider") || "auto");
-    const nativeHandover = data.get("native_handover") === "1";
     const effortChoice = String(data.get("effort") || "high");
 
     const file = data.get("file");
@@ -356,9 +355,8 @@ export async function onRequest(context) {
       msg_id: 1,
       attachment: attachment,
       provider_choice: providerChoice,
-      native_handover: nativeHandover,
       effort: effortChoice,
-      model_info: `Selected: ${providerChoice.toUpperCase()} [Effort: ${effortChoice.toUpperCase()}]${nativeHandover ? ' [NATIVE HANDOVER]' : ''} (Starting...)`,
+      model_info: `Selected: ${providerChoice.toUpperCase()} [Effort: ${effortChoice.toUpperCase()}] (Starting...)`,
       session_id: null,
       provider: null
     }));
@@ -408,22 +406,17 @@ export async function onRequest(context) {
     <input type="text" name="branch" value="main" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
     
     <label style="color:#aaa;font-size:11px;">Primary Provider / Fallback Mode:</label>
-<select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:8px;box-sizing:border-box;">
-  <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> OpenRouter -> Groq)</option>
-  <option value="gemini-3.8">Gemini 3.8 Flash</option>
-  <option value="gemini-3.7">Gemini 3.7 Flash</option>
-  <option value="gemini-3.6">Gemini 3.6 Flash</option>
-  <option value="gemini-3.5">Gemini 3.5 Flash</option>
-  <option value="gemini-3.5-lite">Gemini 3.5 Flash Lite</option>
-  <option value="gemini-3.1-lite">Gemini 3.1 Flash Lite</option>
-  <option value="openrouter">OpenRouter Free</option>
-  <option value="groq">Groq (Qwen 3.6 27B)</option>
-</select>
-
-    <label style="color:#aaa;font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:10px;">
-      <input type="checkbox" name="native_handover" value="1" style="width:16px;height:16px;">
-      Use native model handover (saves a restart on the first fallback — Gemini tiers only, falls back to normal restart-based switching otherwise)
-    </label>
+    <select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
+      <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> OpenRouter -> Groq)</option>
+      <option value="gemini-3.8">Gemini 3.8 Flash</option>
+      <option value="gemini-3.7">Gemini 3.7 Flash</option>
+      <option value="gemini-3.6">Gemini 3.6 Flash</option>
+      <option value="gemini-3.5">Gemini 3.5 Flash</option>
+      <option value="gemini-3.5-lite">Gemini 3.5 Flash Lite</option>
+      <option value="gemini-3.1-lite">Gemini 3.1 Flash Lite</option>
+      <option value="openrouter">OpenRouter Free</option>
+      <option value="groq">Groq (Qwen 3.6 27B)</option>
+    </select>
 
     <label style="color:#aaa;font-size:11px;">Reasoning Effort Level:</label>
     <select name="effort" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:10px;box-sizing:border-box;">
@@ -431,6 +424,7 @@ export async function onRequest(context) {
       <option value="high" selected>High</option>
       <option value="medium">Medium</option>
       <option value="low">Low</option>
+      <option value="none">None (Direct Execution)</option>
     </select>
 
     <label style="color:#aaa;font-size:11px;">Initial Prompt:</label>
