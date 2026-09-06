@@ -53,7 +53,6 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
   }
 
   let contentAcc = '';
-  let reasoningAcc = '';
   const toolCallsAcc = {};
   let finishReason = null;
 
@@ -64,6 +63,12 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
     if (!payload || payload === '[DONE]') return;
     let json;
     try { json = JSON.parse(payload); } catch { return; }
+
+    if (json.error) {
+      const msg = typeof json.error === 'string' ? json.error : (json.error.message || JSON.stringify(json.error));
+      throw new Error(msg);
+    }
+
     const choice = (json.choices && json.choices[0]) || null;
     if (!choice) return;
     if (choice.finish_reason) finishReason = choice.finish_reason;
@@ -71,7 +76,6 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
 
     const reasoningChunk = delta.reasoning || delta.reasoning_content;
     if (typeof reasoningChunk === 'string' && reasoningChunk.length) {
-      reasoningAcc += reasoningChunk;
       streamBuffer += reasoningChunk;
     }
 
@@ -125,7 +129,6 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
   const assistantMsg = { role: 'assistant' };
   if (contentAcc) assistantMsg.content = contentAcc;
   else if (toolCallsList.length === 0) assistantMsg.content = '';
-  if (reasoningAcc) assistantMsg.reasoning_content = reasoningAcc;
   if (toolCallsList.length > 0) assistantMsg.tool_calls = toolCallsList;
 
   return { message: assistantMsg, finishReason, content: contentAcc, toolCalls: toolCallsList };

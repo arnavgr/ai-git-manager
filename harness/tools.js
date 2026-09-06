@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { webSearch } = require('./websearch');
 
 class ToolError extends Error {}
 
@@ -24,6 +25,29 @@ function safeResolve(rel) {
   const resolved = path.resolve(cwd, rel || '.');
   if (resolved !== cwd && !resolved.startsWith(cwd + path.sep)) {
     throw new ToolError('Path escapes the workspace: ' + rel);
+  }
+
+  // FIX: path.resolve() is purely lexical and never follows symlinks. A
+  // symlink committed inside the repo (e.g. by a malicious PR the agent is
+  // later pointed at) could still resolve to a path physically outside cwd,
+  // letting read_file/write_file/replace_in_file act on it. Realpath-check
+  // to close that gap.
+  let cwdReal;
+  try { cwdReal = fs.realpathSync(cwd); } catch { cwdReal = cwd; }
+
+  let real;
+  try {
+    real = fs.realpathSync(resolved);
+  } catch {
+    // Target doesn't exist yet (e.g. a brand-new file for write_file) —
+    // check the nearest existing ancestor directory instead.
+    let dir = path.dirname(resolved);
+    while (dir !== path.dirname(dir) && !fs.existsSync(dir)) dir = path.dirname(dir);
+    try { real = fs.realpathSync(dir); } catch { real = dir; }
+  }
+
+  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) {
+    throw new ToolError('Path escapes the workspace via a symlink: ' + rel);
   }
   return resolved;
 }
@@ -243,7 +267,10 @@ const TOOLS = [
   }
 ];
 
-function executeTool(name, args) {
+// NOTE: async because web_search needs to await a network call. All the
+// existing synchronous cases below are unaffected — they just resolve
+// immediately, same as before. Callers must now `await executeTool(...)`.
+async function executeTool(name, args) {
   try {
     switch (name) {
       case 'list_dir': {
@@ -352,9 +379,24 @@ function executeTool(name, args) {
         const command = String(args.command || '').trim();
         if (!command) return 'Error: no command provided.';
         try {
+          // FIX: don't hand API keys / the GitHub token to arbitrary shell
+          // commands the model decides to run. Git pushes already work
+          // without GH_PAT in the environment (the token is embedded in
+          // git's global `url.insteadOf` rewrite, set up before the harness
+          // starts), so nothing legitimate needs these here — but a
+          // prompt-injected instruction (e.g. from a file the agent read)
+          // asking the agent to run `echo $GH_PAT | curl ...` would.
+          const SECRET_ENV_KEYS = [
+            'GH_PAT', 'GEMINI_API_KEY', 'NVIDIA_API_KEY', 'GROQ_API_KEY',
+            'OPENROUTER_API_KEY', 'TAVILY_API_KEY', 'CF_API_TOKEN',
+            'CF_ACCOUNT_ID', 'KV_NAMESPACE_ID'
+          ];
+          const safeEnv = { ...process.env };
+          for (const k of SECRET_ENV_KEYS) delete safeEnv[k];
+
           const out = execSync(command, {
             encoding: 'utf8', timeout: 30000, maxBuffer: 5 * 1024 * 1024,
-            cwd: process.cwd(), shell: '/bin/bash'
+            cwd: process.cwd(), shell: '/bin/bash', env: safeEnv
           });
           return (out && out.trim()) ? out : '(command completed with no output)';
         } catch (e) {
@@ -364,6 +406,10 @@ function executeTool(name, args) {
           const timedOut = e.killed ? ' (timed out after 30s)' : '';
           return `Command exited with an error${timedOut}:\n${detail || e.message}`;
         }
+      }
+
+      case 'web_search': {
+        return await webSearch(args.query, args.max_results);
       }
 
       default:

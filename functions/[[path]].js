@@ -1,15 +1,41 @@
+async function readTextAttachment(file, maxBytes, defaultName) {
+  if (file.size > maxBytes) {
+    return { ok: false, reason: `File exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit.` };
+  }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const sampleLen = Math.min(buf.length, 8000);
+  for (let i = 0; i < sampleLen; i++) {
+    if (buf[i] === 0) {
+      return {
+        ok: false,
+        reason: `'${file.name || defaultName}' looks like a binary file — only text/code attachments are supported right now (writing it as text would corrupt it).`
+      };
+    }
+  }
+  return { ok: true, name: file.name || defaultName, content: new TextDecoder('utf-8').decode(buf) };
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
   const esc = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+  const safeEqual = (a, b) => {
+    if (!a || !b) return false;
+    a = String(a); b = String(b);
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  };
+
   // =========================================================================
   // GET /browse — Dumbphone GitHub Repo & Branch Explorer / Downloader
   // =========================================================================
   if (url.pathname === "/browse" && request.method === "GET") {
     const pin = url.searchParams.get("pin") || "";
-    if (env.AUTH_PIN && pin !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
+    if (!safeEqual(pin, env.AUTH_PIN)) return new Response("Forbidden", { status: 403 });
 
     let repo = (url.searchParams.get("repo") || "").trim();
     if (repo.startsWith("https://github.com/")) {
@@ -23,7 +49,6 @@ export async function onRequest(context) {
     const branchParam = branch ? `&branch=${encodeURIComponent(branch)}` : "";
     const refQuery = branch ? `?ref=${encodeURIComponent(branch)}` : "";
 
-    // 1. Home screen: list authenticated user's repos + manual input form
     if (!repo) {
       let repoListHtml = "";
       try {
@@ -79,7 +104,6 @@ export async function onRequest(context) {
       return new Response("Invalid repository format. Please use 'owner/repo'.", { status: 400 });
     }
 
-    // 2. Branch Selector View (`action=branches`)
     if (action === "branches") {
       let branchListHtml = "";
       try {
@@ -125,7 +149,6 @@ export async function onRequest(context) {
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
     }
 
-    // 3. Direct Raw Download Handler for specific Branch / Ref
     if (action === "download" || action === "raw") {
       const rawRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}${refQuery}`, {
         headers: {
@@ -150,7 +173,6 @@ export async function onRequest(context) {
       });
     }
 
-    // 4. Directory Listing for specific Branch / Ref
     const apiRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}${refQuery}`, {
       headers: {
         "User-Agent": "CF-Pages-Dumbphone-Browser",
@@ -225,7 +247,7 @@ export async function onRequest(context) {
     const data = await request.formData();
     const pin = data.get("pin") || "";
     
-    if (pin !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
+    if (!safeEqual(pin, env.AUTH_PIN)) return new Response("Forbidden", { status: 403 });
 
     const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { msg_id: 0 };
 
@@ -233,18 +255,22 @@ export async function onRequest(context) {
       return new Response("Session already ended — start a new one from the main page.", { status: 409 });
     }
 
+    if (state.status !== "waiting") {
+      return new Response(
+        `Can't send right now — the agent is still working (status: ${esc(state.status || "unknown")}). ` +
+        `Go back to the chat and wait for it to say WAITING.`,
+        { status: 409, headers: { "content-type": "text/plain; charset=utf-8" } }
+      );
+    }
+
     const msg = String(data.get("msg") || "");
     const file = data.get("file");
     let attachment = null;
 
     if (file && typeof file === "object" && file.size > 0) {
-      if (file.size > 10 * 1024 * 1024) {
-        return new Response("File exceeds 10MB limit.", { status: 413 });
-      }
-      attachment = {
-        name: file.name || "attached_file.txt",
-        content: await file.text()
-      };
+      const result = await readTextAttachment(file, 10 * 1024 * 1024, "attached_file.txt");
+      if (!result.ok) return new Response(result.reason, { status: 415 });
+      attachment = { name: result.name, content: result.content };
     }
 
     const newState = {
@@ -264,7 +290,7 @@ export async function onRequest(context) {
   // =========================================================================
   if (url.pathname === "/chat" && request.method === "GET") {
     const token = url.searchParams.get("token") || "";
-    if (token !== env.AUTH_PIN) return new Response("Forbidden", { status: 403 });
+    if (!safeEqual(token, env.AUTH_PIN)) return new Response("Forbidden", { status: 403 });
 
     const state = await env.AGENT_KV.get("chat_state", { type: "json" }) || { 
       status: "waiting", 
@@ -273,6 +299,7 @@ export async function onRequest(context) {
     };
     
     const isThinking = state.status === "thinking" || state.status === "booting";
+    const isWaiting = state.status === "waiting";
     const refreshMeta = isThinking ? '<meta http-equiv="refresh" content="3">' : '';
     const statusColor = isThinking ? "#ff0" : (state.status === "exited" ? "#f00" : "#0f0");
 
@@ -286,7 +313,7 @@ export async function onRequest(context) {
 </head>
 <body style="background:#000;color:#0f0;font-family:monospace;padding:10px;margin:0;">
   <div style="color:${statusColor};font-size:12px;border-bottom:1px solid #333;padding-bottom:5px;margin-bottom:6px;">
-    STATUS: ${esc((state.status || "unknown").toUpperCase())}${state.strict_pinning ? ' [STRICT PIN]' : ''}
+    STATUS: ${esc((state.status || "unknown").toUpperCase())}${state.strict_pinning ? ' [STRICT PIN]' : ''}${state.web_search_enabled ? ' [WEB]' : ''}
     &nbsp;·&nbsp;<a href="#latest" style="color:#0f0;">jump to latest ↓</a>
     &nbsp;·&nbsp;<a href="/browse?pin=${encodeURIComponent(token)}" style="color:#888;">[Browse Repos]</a>
   </div>
@@ -297,7 +324,9 @@ export async function onRequest(context) {
   <pre style="white-space:pre-wrap;word-break:break-all;background:#111;padding:10px;border:1px solid #333;font-size:13px;margin:0 0 10px 0;">${esc(state.last_agent || "No output yet.")}</pre>
   <a name="latest"></a>
 
-  ${state.status !== "exited" ? `
+  ${state.status === "exited" ? `
+  <div style="color:#f55;">Runner terminated. Return to <a href="/" style="color:#0f0;">main page</a> to start a new task.</div>
+  ` : isWaiting ? `
   <form method="POST" action="/send" enctype="multipart/form-data">
     <input type="hidden" name="pin" value="${esc(token)}">
     <textarea name="msg" rows="3" placeholder="Next instruction..." style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;font-size:14px;box-sizing:border-box;" required></textarea>
@@ -315,7 +344,15 @@ export async function onRequest(context) {
     Commands: <b>/push</b> (manual retry), <b>/revert</b> (undo last commit), <b>/exit</b> (terminate runner)<br>
     <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a> |
     <a href="/browse?pin=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Browse Files ]</a>
-  </div>` : `<div style="color:#f55;">Runner terminated. Return to <a href="/" style="color:#0f0;">main page</a> to start a new task.</div>`}
+  </div>
+  ` : `
+  <div style="color:#ff0;">⏳ Agent is working — this page refreshes automatically. The compose box reappears once it's ready for your next instruction.</div>
+  <br>
+  <div style="font-size:11px;color:#777;">
+    <a href="/chat?token=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Manual Reload ]</a> |
+    <a href="/browse?pin=${encodeURIComponent(token)}" style="color:#555;text-decoration:underline;">[ Browse Files ]</a>
+  </div>
+  `}
 </body>
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
@@ -326,25 +363,31 @@ export async function onRequest(context) {
   if (request.method === "POST" && url.pathname === "/") {
     const data = await request.formData();
     const pin = data.get("pin") || "";
-    if (pin !== env.AUTH_PIN) return new Response("❌ Bad PIN.", { status: 401 });
+    if (!safeEqual(pin, env.AUTH_PIN)) return new Response("❌ Bad PIN.", { status: 401 });
+
+    const force = data.get("force") === "1";
+    const existing = await env.AGENT_KV.get("chat_state", { type: "json" });
+    if (!force && existing && existing.status && existing.status !== "exited") {
+      return new Response(
+        `❌ A session is already active (status: ${existing.status}). Wait for it to finish, send /exit from the chat page, or check "Force Start" to override.`,
+        { status: 409, headers: { "content-type": "text/plain; charset=utf-8" } }
+      );
+    }
 
     const prompt = String(data.get("prompt") || "");
     const repo = String(data.get("repo") || "");
     const branch = String(data.get("branch") || "main");
     const providerChoice = String(data.get("provider") || "auto");
     const strictPinning = data.get("strict_pinning") === "1";
+    const webSearchEnabled = data.get("web_search") === "1";
 
     const file = data.get("file");
     let attachment = null;
 
     if (file && typeof file === "object" && file.size > 0) {
-      if (file.size > 10 * 1024 * 1024) {
-        return new Response("File exceeds 10MB limit.", { status: 413 });
-      }
-      attachment = {
-        name: file.name || "initial_file.txt",
-        content: await file.text()
-      };
+      const result = await readTextAttachment(file, 10 * 1024 * 1024, "initial_file.txt");
+      if (!result.ok) return new Response(result.reason, { status: 415 });
+      attachment = { name: result.name, content: result.content };
     }
 
     await env.AGENT_KV.put("chat_state", JSON.stringify({
@@ -355,7 +398,8 @@ export async function onRequest(context) {
       attachment: attachment,
       provider_choice: providerChoice,
       strict_pinning: strictPinning,
-      model_info: `Selected: ${providerChoice.toUpperCase()}${strictPinning ? ' [STRICT PIN]' : ''} (Starting...)`,
+      web_search_enabled: webSearchEnabled,
+      model_info: `Selected: ${providerChoice.toUpperCase()}${strictPinning ? ' [STRICT PIN]' : ''}${webSearchEnabled ? ' [WEB]' : ''} (Starting...)`,
       session_id: null,
       provider: null
     }));
@@ -375,6 +419,16 @@ export async function onRequest(context) {
 
     if (!res.ok) {
       const errText = await res.text();
+      await env.AGENT_KV.put("chat_state", JSON.stringify({
+        status: "exited",
+        last_user: prompt,
+        last_agent: `❌ Failed to start runner (GitHub API error): ${errText}`,
+        model_info: "Dispatch failed",
+        msg_id: 1,
+        attachment: null,
+        session_id: null,
+        provider: null
+      }));
       return new Response(`❌ GitHub API Error: ${errText}`, { status: res.status });
     }
 
@@ -423,6 +477,16 @@ export async function onRequest(context) {
     <label style="color:#aaa;font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:12px;">
       <input type="checkbox" name="strict_pinning" value="1" style="width:16px;height:16px;">
       Strict Model Pinning (Disable fallback; fail immediately if selected model hits rate limits or errors)
+    </label>
+
+    <label style="color:#aaa;font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+      <input type="checkbox" name="web_search" value="1" style="width:16px;height:16px;">
+      Enable Web Search (Tavily documentation lookup)
+    </label>
+
+    <label style="color:#aaa;font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+      <input type="checkbox" name="force" value="1" style="width:16px;height:16px;">
+      Force Start (Override active session lock if a previous runner crashed or timed out)
     </label>
 
     <label style="color:#aaa;font-size:11px;">Initial Prompt:</label>

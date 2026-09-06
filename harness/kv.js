@@ -7,6 +7,7 @@ const KV_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/s
 const HEADERS = { "Authorization": `Bearer ${CF_API_TOKEN}`, "Content-Type": "application/json" };
 
 let isTurnActive = false;
+let flushInFlight = false;
 
 function setTurnActive(active) {
   isTurnActive = active;
@@ -27,24 +28,30 @@ async function setState(data) {
 }
 
 function flushThinkingKV(text) {
-  if (!isTurnActive) return;
+  if (!isTurnActive || flushInFlight) return;
+  flushInFlight = true;
   (async () => {
     try {
       if (!isTurnActive) return;
       const s = (await getState()) || {};
+      if (!isTurnActive) return; // Guard against turn finishing during network roundtrip
       await setState({ ...s, status: 'thinking', last_agent: text });
     } catch {}
+    finally { flushInFlight = false; }
   })();
 }
 
 function flushSwitchKV(info) {
-  if (!isTurnActive) return;
+  if (!isTurnActive || flushInFlight) return;
+  flushInFlight = true;
   (async () => {
     try {
       if (!isTurnActive) return;
       const s = (await getState()) || {};
+      if (!isTurnActive) return; // Guard against turn finishing during network roundtrip
       await setState({ ...s, status: 'thinking', model_info: info, last_agent: info });
     } catch {}
+    finally { flushInFlight = false; }
   })();
 }
 

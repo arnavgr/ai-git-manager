@@ -35,7 +35,14 @@ function buildContextSnapshot() {
   return snap;
 }
 
-function buildSystemPrompt() {
+function buildSystemPrompt(webSearchEnabled) {
+  const webSearchToolLine = webSearchEnabled
+    ? `\n- web_search { query, max_results? }: search the live web for current information (docs, recent errors, version numbers, anything that may have changed since training).`
+    : '';
+  const webSearchRuleLine = webSearchEnabled
+    ? `\n- Use web_search sparingly and only for things that are actually time-sensitive or external (current library APIs, recent breaking changes, error messages you don't recognize). Don't use it as a substitute for reading the repo's own code.`
+    : '';
+
   return `You are an expert autonomous software engineer operating inside a cloned Git repository (the "workspace"). Your working directory is the repository root. You complete real engineering tasks by reading, searching, editing, and verifying code.
 
 TOOLS
@@ -45,7 +52,7 @@ TOOLS
 - find_files { pattern }: glob search for file paths (e.g. "**/*.test.js").
 - write_file { path, content }: create a NEW file or fully overwrite one. Creates parent dirs. Rejected if overwriting existing file with a tiny snippet.
 - replace_in_file { path, replacements: [{search, replace}] }: edit EXISTING files with precise search/replace blocks.
-- run_command { command }: run a non-interactive bash command (30s timeout) for builds, tests, git, installs, etc.
+- run_command { command }: run a non-interactive bash command (30s timeout) for builds, tests, git, installs, etc.${webSearchToolLine}
 
 WORKFLOW (follow strictly)
 1. UNDERSTAND: Before editing, locate relevant code with grep_search / find_files, then read_file the files you plan to change. Never guess file contents.
@@ -63,7 +70,7 @@ RULES
 - Preserve the existing code style (indentation, quotes, naming conventions).
 - Never run interactive or never-terminating commands; never run commands that wait for input.
 - If something is ambiguous, investigate the codebase before assuming.
-- Your final answer must be plain text with no tool calls.`;
+- Your final answer must be plain text with no tool calls.${webSearchRuleLine}`;
 }
 
 module.exports = { buildSystemPrompt, buildRepoMap, buildContextSnapshot };

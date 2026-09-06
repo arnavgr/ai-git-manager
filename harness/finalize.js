@@ -6,9 +6,17 @@ const { getState, setState, setTurnActive } = require('./kv');
   try {
     setTurnActive(false);
     const state = (await getState()) || {};
+    const cleanExit = state.last_agent && /terminated/i.test(state.last_agent);
     state.status = 'exited';
-    state.model_info = 'Runner disconnected';
-    if (!state.last_agent || !state.last_agent.includes('terminated')) {
+    // FIX: this step runs on every run via `if: always()`, including the
+    // clean /exit and idle-timeout paths, which already set a specific,
+    // more useful model_info ('Session terminated.' / 'Session expired
+    // (Inactivity)'). Only stamp the generic message when nothing already
+    // explained why the runner stopped.
+    if (!cleanExit) {
+      state.model_info = 'Runner disconnected';
+    }
+    if (!cleanExit) {
       state.last_agent = 'Session ended.\n\n' + (state.last_agent || '');
     }
     await setState(state);

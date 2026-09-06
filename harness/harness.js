@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 
 const { PROVIDERS, DEFAULT_ORDER } = require('./providers');
 const { TOOLS, executeTool } = require('./tools');
+const { WEB_SEARCH_TOOL } = require('./websearch');
 const { buildSystemPrompt, buildContextSnapshot } = require('./prompt');
 const { callLLMWithFailover } = require('./llm');
 const { getState, setState, setTurnActive, flushThinkingKV, flushSwitchKV } = require('./kv');
@@ -39,14 +40,14 @@ function pushChanges() {
   }
 }
 
-async function runAgentTurn(messages, candidateKeys, onFlush, onSwitch) {
+async function runAgentTurn(messages, candidateKeys, tools, onFlush, onSwitch) {
   let providerIdx = 0;
   const allFailed = [];
   let lastUsedKey = candidateKeys[0];
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     const { response, usedIdx, failed } =
-      await callLLMWithFailover(messages, candidateKeys, providerIdx, TOOLS, onFlush, onSwitch, PROVIDERS);
+      await callLLMWithFailover(messages, candidateKeys, providerIdx, tools, onFlush, onSwitch, PROVIDERS);
     allFailed.push(...failed);
     providerIdx = usedIdx;
     lastUsedKey = candidateKeys[usedIdx];
@@ -62,7 +63,10 @@ async function runAgentTurn(messages, candidateKeys, onFlush, onSwitch) {
           onFlush(`🔧 Running tool: ${tc.function.name}...`);
         }
         let toolResult;
-        try { toolResult = executeTool(tc.function.name, args); }
+        // FIX: executeTool is async now (web_search awaits a network call) —
+        // this used to assign the Promise object itself as toolResult instead
+        // of its resolved value, and would never have caught a rejection.
+        try { toolResult = await executeTool(tc.function.name, args); }
         catch (e) { toolResult = 'Tool execution error: ' + e.message; }
         messages.push({ role: 'tool', tool_call_id: tc.id, content: truncate(toolResult, TOOL_RESULT_MAX) });
       }
@@ -86,6 +90,31 @@ spawnSync('git', ['config', 'user.name', 'OpenClaude Agent'], { stdio: 'inherit'
 spawnSync('git', ['config', 'user.email', 'agent@arnavgr.com'], { stdio: 'inherit' });
 
 let conversation = null;
+
+// FIX (message-loss race): if the user sends a follow-up message while a
+// turn is still in flight (KV status "thinking"), the old code always wrote
+// back `msg_id: lastMsgId` — the id it started this turn with — clobbering
+// whatever newer msg_id/last_user/attachment a concurrent /send had just
+// written, and *rewinding* msg_id so the newer message could never trigger
+// `state.msg_id > lastMsgId` again. It was silently and permanently lost.
+//
+// This also fixes a second, related bug: every call site used to reconstruct
+// the KV object field-by-field (`{ status, last_user, msg_id, provider_choice:
+// state.provider_choice || 'auto', ... }`), so any field not explicitly
+// re-listed here (like the new `web_search_enabled` toggle) would quietly
+// vanish after the first turn. Spreading the freshest KV read fixes both at
+// once: nothing is dropped, and an in-flight newer message is preserved and
+// picked up on the very next loop iteration instead of being overwritten.
+async function finalizeTurn(lastMsgId, patch) {
+  const latestKV = (await getState()) || {};
+  const pendingNewer = Number(latestKV.msg_id) > lastMsgId;
+  await setState({
+    ...latestKV,
+    ...patch,
+    status: pendingNewer ? 'thinking' : 'waiting'
+  });
+  return pendingNewer;
+}
 
 async function loop() {
   let lastMsgId = 0;
@@ -112,7 +141,7 @@ async function loop() {
         } else if (userMsg === '/push') {
           setTurnActive(false);
           const pushResult = pushChanges();
-          await setState({ ...state, status: 'waiting', last_agent: pushResult.message, attachment: null });
+          await finalizeTurn(lastMsgId, { last_agent: pushResult.message, attachment: null });
           lastActivityTime = Date.now();
           continue;
         } else if (userMsg === '/revert') {
@@ -121,7 +150,7 @@ async function loop() {
           let msg;
           if (revert.status !== 0) msg = '❌ Revert failed: ' + (revert.stderr || revert.stdout || 'unknown error').trim();
           else { const pushResult = pushChanges(); msg = '↩️ Reverted the last commit.\n' + pushResult.message; }
-          await setState({ ...state, status: 'waiting', last_agent: msg, attachment: null });
+          await finalizeTurn(lastMsgId, { last_agent: msg, attachment: null });
           lastActivityTime = Date.now();
           continue;
         }
@@ -147,14 +176,25 @@ async function loop() {
           candidateKeys = DEFAULT_ORDER.slice();
         }
 
+        const webSearchEnabled = !!state.web_search_enabled && !!process.env.TAVILY_API_KEY;
+        const tools = webSearchEnabled ? [...TOOLS, WEB_SEARCH_TOOL] : TOOLS;
+
         if (!conversation) {
-          conversation = [{ role: 'system', content: buildSystemPrompt() + '\n\n' + buildContextSnapshot() }];
+          conversation = [{ role: 'system', content: '' }];
         }
+        // FIX (stale context): the system message used to be built once and
+        // never touched again, so the "REPOSITORY FILE MAP" and key-file
+        // snapshots (package.json, README, etc.) baked into it went stale
+        // the moment the agent created/edited anything in turn 1 — later
+        // turns kept seeing the turn-0 snapshot. Rebuilding it fresh before
+        // every turn keeps it accurate, and also lets the tool list/rules
+        // reflect the current web_search_enabled setting.
+        conversation[0].content = buildSystemPrompt(webSearchEnabled) + '\n\n' + buildContextSnapshot();
         conversation.push({ role: 'user', content: instruction });
 
         let finalOutput, telemetryString;
         try {
-          const result = await runAgentTurn(conversation, candidateKeys, flushThinkingKV, flushSwitchKV);
+          const result = await runAgentTurn(conversation, candidateKeys, tools, flushThinkingKV, flushSwitchKV);
           finalOutput = result.finalText;
           const activeLabel = PROVIDERS[result.providerKey] ? PROVIDERS[result.providerKey].label : result.providerKey;
           telemetryString = `Active: ${activeLabel}${isStrict ? ' [STRICT PIN]' : ''}`;
@@ -168,10 +208,12 @@ async function loop() {
         finalOutput += '\n\n---\n' + pushResult.message;
 
         setTurnActive(false);
-        await setState({
-          status: 'waiting', last_user: userMsg, last_agent: finalOutput, msg_id: lastMsgId,
-          session_id: null, provider: null, provider_choice: state.provider_choice || 'auto',
-          strict_pinning: isStrict, model_info: telemetryString, attachment: null
+        await finalizeTurn(lastMsgId, {
+          last_agent: finalOutput,
+          session_id: null,
+          provider: null,
+          model_info: telemetryString,
+          attachment: null
         });
         lastActivityTime = Date.now();
       }

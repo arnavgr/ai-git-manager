@@ -1,5 +1,14 @@
 name: Live Chat Agent (Native Harness)
 
+# FIX: without this, two workflow_dispatch runs could be live at the same
+# time, and since there's a single global "chat_state" KV key, both would
+# read/write it and garble each other's state. New runs now queue behind an
+# in-progress one instead of colliding (see also the dispatcher-side guard
+# added in functions/[[path]].js).
+concurrency:
+  group: live-chat-agent
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -31,6 +40,7 @@ jobs:
       GROQ_MODEL: "qwen/qwen3.8-27b"
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_MODEL: "openrouter/free"
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       USER_PROMPT: ${{ github.event.inputs.prompt }}
       TARGET_REPO: ${{ github.event.inputs.repo }}
       TARGET_BRANCH: ${{ github.event.inputs.branch }}
