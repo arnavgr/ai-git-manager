@@ -460,7 +460,7 @@ export async function onRequest(context) {
     
     <label style="color:#aaa;font-size:11px;">Primary Provider / Fallback Mode:</label>
     <select name="provider" style="width:100%;background:#222;color:#fff;border:1px solid #555;padding:10px;margin-bottom:8px;box-sizing:border-box;">
-      <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> NIM DeepSeek V4 -> NIM Kimi K3 -> OpenRouter -> Groq 3.8 -> Groq 3.6)</option>
+      <option value="auto">Auto Fallback (3.8 Flash -> 3.7 Flash -> 3.6 Flash -> 3.5 Flash -> 3.5 Lite -> 3.1 Lite -> NIM DeepSeek V4 -> NIM Kimi K3 -> OpenRouter -> OrcaRouter -> Groq 3.8 -> Groq 3.6)</option>
       <option value="gemini-3.8">Gemini 3.8 Flash</option>
       <option value="gemini-3.7">Gemini 3.7 Flash</option>
       <option value="gemini-3.6">Gemini 3.6 Flash</option>
@@ -470,6 +470,7 @@ export async function onRequest(context) {
       <option value="nim-deepseek-v4">NVIDIA NIM (DeepSeek V4 Flash)</option>
       <option value="nim-kimi-k3">NVIDIA NIM (Kimi K3)</option>
       <option value="openrouter">OpenRouter Free</option>
+      <option value="orcarouter">OrcaRouter Free</option>
       <option value="groq">Groq (Qwen 3.8 27B)</option>
       <option value="groq-3.6">Groq (Qwen 3.6 27B)</option>
     </select>
