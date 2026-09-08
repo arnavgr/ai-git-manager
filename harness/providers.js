@@ -66,9 +66,10 @@ const PROVIDERS = {
   'orcarouter': {
     label: 'OrcaRouter Free',
     url: 'https://api.orcarouter.ai/v1/chat/completions',
-    model: 'orcarouter/free',
+    model: process.env.ORCAROUTER_MODEL || 'orcarouter/free',
     key: process.env.ORCAROUTER_API_KEY,
-    maxTokens: 4000
+    maxTokens: 4000,
+    extraHeaders: { 'Accept': 'text/event-stream' }
   },
   'groq': {
     label: 'Groq (Qwen 3.8 27B)',
