@@ -63,6 +63,13 @@ const PROVIDERS = {
     maxTokens: 4000,
     extraHeaders: { 'HTTP-Referer': 'https://github.com', 'X-Title': 'CloudPhone-Agent' }
   },
+  'orcarouter': {
+    label: 'OrcaRouter Free',
+    url: 'https://api.orcarouter.ai/v1/chat/completions',
+    model: 'orcarouter/free',
+    key: process.env.ORCAROUTER_API_KEY,
+    maxTokens: 4000
+  },
   'groq': {
     label: 'Groq (Qwen 3.8 27B)',
     url: 'https://api.groq.com/openai/v1/chat/completions',
@@ -89,6 +96,7 @@ const DEFAULT_ORDER = [
   'nim-deepseek-v4',
   'nim-kimi-k3',
   'openrouter',
+  'orcarouter',
   'groq',
   'groq-3.6'
 ];
