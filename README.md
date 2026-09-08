@@ -15,12 +15,24 @@ The system runs [OpenClaude](https://github.com/gitlawb/openclaude) inside GitHu
 
 ## Model Fallback Chain
 
-If a provider exhausts its quota or returns a `429`, the runner automatically falls back to the next tier:
+If a provider exhausts its quota or returns a `429`, the runner automatically falls back to the next configured provider:
 
-1. **Gemini 3.5 Flash** (`gemini-3.5-flash`)
-2. **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`)
-3. **Groq** (`qwen/qwen3.6-27b` with `16384` token output limiter)
-4. **OpenRouter** (`openrouter/free`)
+1. **Gemini 3.8 Flash** (`gemini-3.8-flash`)
+2. **Gemini 3.7 Flash** (`gemini-3.7-flash`)
+3. **Gemini 3.6 Flash** (`gemini-3.6-flash`)
+4. **Gemini 3.5 Flash** (`gemini-3.5-flash`)
+5. **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`)
+6. **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`)
+7. **NVIDIA NIM DeepSeek V4 Flash** (`deepseek-ai/deepseek-v4-flash-0731`)
+8. **NVIDIA NIM Kimi K3** (`moonshotai/kimi-k3`)
+9. **OpenRouter Free** (`openrouter/free`)
+10. **OrcaRouter Free** (`orcarouter/free`)
+11. **Groq Qwen 3.8 27B** (`qwen/qwen3.8-27b`)
+12. **Groq Qwen 3.6 27B** (`qwen/qwen3.6-27b`)
+
+OrcaRouter uses the OpenAI-compatible endpoint:
+
+`https://api.orcarouter.ai/v1/chat/completions`
 
 ---
 
@@ -37,8 +49,10 @@ In the repository hosting your `agent.yml` workflow, navigate to **Settings > Se
 | `KV_NAMESPACE_ID`    | ID of your Cloudflare KV Namespace                                       |
 | `GH_PAT`             | GitHub Personal Access Token (Classic) with `repo` and `workflow` scopes |
 | `GEMINI_API_KEY`     | Google Gemini API Key                                                    |
+| `NVIDIA_API_KEY`     | NVIDIA NIM API Key                                                       |
 | `GROQ_API_KEY`       | Groq API Key                                                             |
 | `OPENROUTER_API_KEY` | *(Optional)* OpenRouter API Key                                          |
+| `ORCAROUTER_API_KEY` | *(Optional)* OrcaRouter API Key for `orcarouter/free`                    |
 | `TAVILY_API_KEY`     | *(Optional)* Tavily API Key for web search capabilities                  |
 
 ### 2. Cloudflare Pages Deployment
@@ -62,11 +76,10 @@ Send these commands directly in the chat interface during an active session:
 * `/push` — Stages all changes (`git add .`), creates a commit, and pushes to the target branch.
 * `/exit` — Forcefully terminates the runner and ends the session.
 
-*Note: The runner automatically shuts down after 15 minutes of inactivity to prevent consuming GitHub Actions minutes.*
+*Note: The runner automatically shuts down after 30 minutes of inactivity.*
 
 ---
 
 ## License
 
 MIT
-
