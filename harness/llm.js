@@ -2,6 +2,10 @@
 
 const { RateLimitError, ProviderError, isRateLimitText } = require('./providers');
 
+function providerDebugName(provider) {
+  return `${provider.label} (${provider.model})`;
+}
+
 async function streamChatCompletion(provider, messages, tools, onFlush) {
   let streamBuffer = '';
   let lastFlushedLen = -1;
@@ -11,6 +15,16 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
       try { onFlush(streamBuffer); } catch {}
     }
   }, 2500) : null;
+
+  if (!provider || !provider.url || !provider.model) {
+    if (flushTimer) clearInterval(flushTimer);
+    throw new ProviderError(`Invalid provider configuration for ${provider?.label || 'unknown provider'}`);
+  }
+
+  if (!provider.key) {
+    if (flushTimer) clearInterval(flushTimer);
+    throw new ProviderError(`${providerDebugName(provider)} has no API key configured (expected its provider secret in the GitHub Actions environment)`);
+  }
 
   const bodyObj = {
     model: provider.model,
@@ -28,6 +42,7 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
       signal: AbortSignal.timeout(600000),
       headers: {
         'Content-Type': 'application/json',
+        'Accept': 'text/event-stream, application/json',
         'Authorization': `Bearer ${provider.key}`,
         ...(provider.extraHeaders || {})
       },
@@ -35,21 +50,25 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
     });
   } catch (netErr) {
     if (flushTimer) clearInterval(flushTimer);
-    throw new ProviderError(`Network error reaching ${provider.label}: ${netErr.message}`);
+    throw new ProviderError(`Network error reaching ${providerDebugName(provider)}: ${netErr.message}`);
   }
 
-  if (res.status === 429) {
-    if (flushTimer) clearInterval(flushTimer);
-    throw new RateLimitError(`HTTP 429 (rate limit) from ${provider.label}`);
-  }
   if (!res.ok) {
     let errText = '';
     try { errText = await res.text(); } catch {}
     if (flushTimer) clearInterval(flushTimer);
-    if (isRateLimitText(errText) || isRateLimitText(String(res.status))) {
-      throw new RateLimitError(`Quota/rate-limit error from ${provider.label} (HTTP ${res.status})`);
+
+    const details = String(errText || '').trim().slice(0, 1000);
+    if (res.status === 429 || isRateLimitText(errText) || isRateLimitText(String(res.status))) {
+      throw new RateLimitError(
+        `HTTP ${res.status} from ${providerDebugName(provider)}${details ? `: ${details}` : ''}`
+      );
     }
-    throw new ProviderError(`HTTP ${res.status} from ${provider.label}: ${String(errText).slice(0, 400)}`);
+
+    throw new ProviderError(
+      `HTTP ${res.status} from ${providerDebugName(provider)}${details ? `: ${details}` : ' (empty response body)'} ` +
+      `\nRequest: stream=true, tools=${Array.isArray(tools) ? tools.length : 0}, max_tokens=${provider.maxTokens || 'unset'}`
+    );
   }
 
   let contentAcc = '';
@@ -98,6 +117,10 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
   }
 
   try {
+    if (!res.body) {
+      throw new Error('Provider returned an empty response body');
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder('utf8');
     let buffer = '';
@@ -113,10 +136,11 @@ async function streamChatCompletion(provider, messages, tools, onFlush) {
     if (buffer.trim()) for (const ln of buffer.split('\n')) handleLine(ln);
   } catch (streamErr) {
     if (flushTimer) clearInterval(flushTimer);
-    if (isRateLimitText(streamErr && streamErr.message)) {
-      throw new RateLimitError(`Mid-stream rate limit from ${provider.label}: ${streamErr.message}`);
+    const msg = streamErr && streamErr.message ? streamErr.message : String(streamErr);
+    if (isRateLimitText(msg)) {
+      throw new RateLimitError(`Mid-stream rate limit from ${providerDebugName(provider)}: ${msg}`);
     }
-    throw new ProviderError(`Mid-stream failure from ${provider.label}: ${streamErr && streamErr.message}`);
+    throw new ProviderError(`Mid-stream failure from ${providerDebugName(provider)}: ${msg}`);
   }
 
   if (flushTimer) clearInterval(flushTimer);
@@ -139,13 +163,13 @@ async function callLLMWithFailover(messages, candidateKeys, startIdx, tools, onF
   for (let i = startIdx; i < candidateKeys.length; i++) {
     const key = candidateKeys[i];
     const provider = PROVIDERS[key];
-    if (!provider || !provider.key) { failed.push(provider ? provider.label : key); continue; }
+    if (!provider) { failed.push(`${key} (unknown provider)`); continue; }
     try {
       const response = await streamChatCompletion(provider, messages, tools, onFlush);
       return { response, usedIdx: i, failed };
     } catch (e) {
       if (e instanceof RateLimitError || e instanceof ProviderError) {
-        failed.push(provider.label);
+        failed.push(`${provider.label}: ${e.message}`);
         const next = candidateKeys[i + 1];
         if (onSwitch) {
           onSwitch(`⚠️ ${provider.label} failed (${e.message}). ${next ? 'Switching to ' + PROVIDERS[next].label + '...' : 'No more providers.'}`);
@@ -155,7 +179,7 @@ async function callLLMWithFailover(messages, candidateKeys, startIdx, tools, onF
       throw e;
     }
   }
-  const err = new Error('All providers failed: ' + failed.join(', '));
+  const err = new Error('All providers failed:\n' + failed.join('\n'));
   err.allFailed = failed;
   throw err;
 }
